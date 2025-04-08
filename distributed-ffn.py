@@ -51,15 +51,27 @@ layer_params = init_tlayer_ffn(D, FFN)
 
 # Forward
 y = tlayer_ffn_fwd(layer_params, x)
-print('y', y.shape, y[:10, :10])
+#print('y', y.shape, y[:10, :10])
 
 # Backward
 dloss_dx, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)
-print('dloss_dx', dloss_dx.shape, dloss_dx[:10, :10])
-print('dloss_dp[0]', dloss_dp[0].shape, dloss_dp[0][:10, :10])
-print('dloss_dp[1]', dloss_dp[1].shape, dloss_dp[1][:10, :10])
+#print('dloss_dx', dloss_dx.shape, dloss_dx[:10, :10])
+#print('dloss_dp[0]', dloss_dp[0].shape, dloss_dp[0][:10, :10])
+#print('dloss_dp[1]', dloss_dp[1].shape, dloss_dp[1][:10, :10])
 
 # Optimizer step (just SGD for now)
-n_layer_params =tuple([p-0.001*g for p, g in zip(layer_params, dloss_dp)])
-print(f'n_layer_params[0]', n_layer_params[0].shape, n_layer_params[0][:10, :10])
-print(f'n_layer_params[1]', n_layer_params[1].shape, n_layer_params[1][:10, :10])
+n_layer_params_1gpu =tuple([p-0.001*g for p, g in zip(layer_params, dloss_dp)])
+print(f'n_layer_params_1gpu[0]', n_layer_params_1gpu[0].shape, n_layer_params_1gpu[0][:10, :10])
+print(f'n_layer_params_1gpu[1]', n_layer_params_1gpu[1].shape, n_layer_params_1gpu[1][:10, :10])
+
+################### MULTI-GPU ########################
+import torch.cuda.nccl as nccl
+
+nGPUs = torch.cuda.device_count()
+def clone_layer_params(layer_params, device):
+    return tuple([torch.clone(p).cuda(device) for p in layer_params])
+gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)]
+#gpus_x
+#gpus_dloss_dx
+
+#### DDP
