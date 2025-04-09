@@ -41,52 +41,54 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
 #### Training methods: 1GPU, DDP
 
-def train_step_1gpu(dloss_dx, layer_params, x):
+def train_1gpu(dloss_dx, layer_params, x, steps=2):
     x = x.cuda(0)
     dloss_dx = dloss_dx.cuda(0)
     layer_params = [p.cuda(0) for p in layer_params]
 
-    # Forward
-    y = tlayer_ffn_fwd(layer_params, x)
+    for _ in range(steps):
+        # Forward
+        y = tlayer_ffn_fwd(layer_params, x)
+        
+        # Backward
+        _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)
+        
+        # Optimizer step (just SGD for now)
+        layer_params = [p-0.001*g for p, g in zip(layer_params, dloss_dp)]
     
-    # Backward
-    _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)
-    
-    # Optimizer step (just SGD for now)
-    n_layer_params = [p-0.001*g for p, g in zip(layer_params, dloss_dp)]
-    
-    return n_layer_params
+    return layer_params
 
 
 def tlayer_ffn_bkwd_wrapper(gpu_args):
         return tlayer_ffn_bkwd(gpu_args[0], gpu_args[1], gpu_args[2])[1]
 
-def train_step_ddp(dloss_dx, layer_params, x):
+def train_ddp(dloss_dx, layer_params, x, steps=2):
     assert BS % nGPUs == 0
-    
-    def clone_layer_params(layer_params, device):
-        return tuple([torch.clone(p).cuda(device) for p in layer_params])
-    gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)] 
-    gpus_x = torch.chunk(x, nGPUs, dim=0)
-    gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
-    gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
-    gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
 
     mp.set_start_method('spawn')
-    with mp.Pool(nGPUs) as p:
-        gpus_args = zip(gpus_dloss_dx, gpus_layer_params, gpus_x) 
-        gpus_dloss_dp = p.map(tlayer_ffn_bkwd_wrapper, gpus_args)
-    #gpus_dloss_dp = [tlayer_ffn_bkwd(gpu_dloss_dx, gpu_layer_params, gpu_x)[1] for gpu_dloss_dx, gpu_layer_params, gpu_x  in zip(gpus_dloss_dx, gpus_layer_params, gpus_x)]
+    for _ in range(steps):
+        def clone_layer_params(layer_params, device):
+            return tuple([torch.clone(p).cuda(device) for p in layer_params])
+        gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)] 
+        gpus_x = torch.chunk(x, nGPUs, dim=0)
+        gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
+        gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
+        gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
+    
+        with mp.Pool(nGPUs) as p:
+            gpus_args = zip(gpus_dloss_dx, gpus_layer_params, gpus_x) 
+            gpus_dloss_dp = p.map(tlayer_ffn_bkwd_wrapper, gpus_args)
+        #gpus_dloss_dp = [tlayer_ffn_bkwd(gpu_dloss_dx, gpu_layer_params, gpu_x)[1] for gpu_dloss_dx, gpu_layer_params, gpu_x  in zip(gpus_dloss_dx, gpus_layer_params, gpus_x)]
+    
+        gpus_ffn1_dloss_dp = [dloss_dp[0] for dloss_dp in gpus_dloss_dp]
+        gpus_ffn2_dloss_dp = [dloss_dp[1] for dloss_dp in gpus_dloss_dp]
+        nccl.all_reduce(gpus_ffn1_dloss_dp)
+        nccl.all_reduce(gpus_ffn2_dloss_dp)   
+    
+        # Optimizer step (just SGD for now)
+        layer_params = [p-0.001*g for p, g in zip(gpus_layer_params[0], (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
 
-    gpus_ffn1_dloss_dp = [dloss_dp[0] for dloss_dp in gpus_dloss_dp]
-    gpus_ffn2_dloss_dp = [dloss_dp[1] for dloss_dp in gpus_dloss_dp]
-    nccl.all_reduce(gpus_ffn1_dloss_dp)
-    nccl.all_reduce(gpus_ffn2_dloss_dp)   
-
-    # Optimizer step (just SGD for now)
-    n_layer_params = [p-0.001*g for p, g in zip(gpus_layer_params[0], (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
-
-    return n_layer_params
+    return layer_params
 
 #### Setup:
 
@@ -98,9 +100,9 @@ layer_params = init_tlayer_ffn(D, FFN)
 
 if __name__ == '__main__':
     
-    n_layer_params_1gpu = train_step_1gpu(dloss_dx, layer_params, x)
+    n_layer_params_1gpu = train_1gpu(dloss_dx, layer_params, x)
     print(f'n_layer_params_1gpu', n_layer_params_1gpu)
-    n_layer_params_ddp = train_step_ddp(dloss_dx, layer_params, x)
+    n_layer_params_ddp = train_ddp(dloss_dx, layer_params, x)
     print(f'n_layer_params_ddp', n_layer_params_ddp)
     
     assert torch.allclose(n_layer_params_ddp[0], n_layer_params_1gpu[0]), f"n_layer_params_ddp[0] {n_layer_params_ddp[0]} n_layer_params_1gpu[0] {n_layer_params_1gpu[0]}"
