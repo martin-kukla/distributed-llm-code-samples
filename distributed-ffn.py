@@ -41,14 +41,6 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
     return dloss_dx.reshape(x_in.shape), (ffn1_dloss_dp, ffn2_dloss_dp)
 
-#### Setup:
-
-BS, D = 8, 4 #32, 16
-FFN = 4 * D
-x = torch.randn((BS, D), device="cuda")
-dloss_dx = torch.randn((BS, D), device="cuda")
-layer_params = init_tlayer_ffn(D, FFN)
-
 #### Training methods: 1GPU, DDP
 
 def train_step_1gpu(dloss_dx, layer_params, x):
@@ -94,7 +86,14 @@ def train_step_ddp(dloss_dx, layer_params, x):
     n_layer_params = [p-0.001*g for p, g in zip(layer_params, (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
 
     return n_layer_params
-    
+
+#### Setup:
+
+BS, D = 8, 4 #32, 16
+FFN = 4 * D
+x = torch.randn((BS, D), device="cuda")
+dloss_dx = torch.randn((BS, D), device="cuda")
+layer_params = init_tlayer_ffn(D, FFN)
 
 if __name__ == '__main__':
     
