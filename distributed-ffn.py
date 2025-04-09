@@ -43,8 +43,8 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
 #### Setup:
 
-BS, D = 4, 1 #4, 1 #8, 4 #32, 16
-FFN = 2 * D #4 * D
+BS, D = 8, 4 #32, 16
+FFN = 4 * D
 x = torch.randn((BS, D), device="cuda")
 dloss_dx = torch.randn((BS, D), device="cuda")
 layer_params = init_tlayer_ffn(D, FFN)
@@ -60,9 +60,9 @@ def train_step_1gpu(dloss_dx, layer_params, x):
     _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)
     
     # Optimizer step (just SGD for now)
-    n_layer_params_1gpu =tuple([p-0.001*g for p, g in zip(layer_params, dloss_dp)])
+    n_layer_params = [p-0.001*g for p, g in zip(layer_params, dloss_dp)]
     
-    return dloss_dp
+    return n_layer_params
 
 
 def tlayer_ffn_bkwd_wrapper(gpu_args):
@@ -90,15 +90,18 @@ def train_step_ddp(dloss_dx, layer_params, x):
     nccl.all_reduce(gpus_ffn1_dloss_dp)
     nccl.all_reduce(gpus_ffn2_dloss_dp)   
 
-    return (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0])
+    # Optimizer step (just SGD for now)
+    n_layer_params = [p-0.001*g for p, g in zip(layer_params, (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
+
+    return n_layer_params
     
 
 if __name__ == '__main__':
     
-    dloss_dp_1gpu = train_step_1gpu(dloss_dx, layer_params, x)
-    print(f'dloss_dp_1gpu', dloss_dp_1gpu)
-    dloss_dp_ddp = train_step_ddp(dloss_dx, layer_params, x)
-    print(f'dloss_dp_ddp', dloss_dp_ddp)
+    n_layer_params_1gpu = train_step_1gpu(dloss_dx, layer_params, x)
+    print(f'n_layer_params_1gpu', n_layer_params_1gpu)
+    n_layer_params_ddp = train_step_ddp(dloss_dx, layer_params, x)
+    print(f'n_layer_params_ddp', n_layer_params_ddp)
     
-    assert torch.allclose(dloss_dp_ddp[0], dloss_dp_1gpu[0]), f"dloss_dp_ddp[0] {dloss_dp_ddp[0]} dloss_dp_1gpu[0] {dloss_dp_1gpu[0]}"
-    assert torch.allclose(dloss_dp_ddp[1], dloss_dp_1gpu[1]), f"dloss_dp_ddp[1] {dloss_dp_ddp[1]} dloss_dp_1gpu[1] {dloss_dp_1gpu[1]}"
+    assert torch.allclose(n_layer_params_ddp[0], n_layer_params_1gpu[0]), f"n_layer_params_ddp[0] {n_layer_params_ddp[0]} n_layer_params_1gpu[0] {n_layer_params_1gpu[0]}"
+    assert torch.allclose(n_layer_params_ddp[1], n_layer_params_1gpu[1]), f"n_layer_params_ddp[1] {n_layer_params_ddp[1]} n_layer_params_1gpu[1] {n_layer_params_1gpu[1]}"
