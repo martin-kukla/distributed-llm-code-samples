@@ -73,6 +73,8 @@ import multiprocessing as mp
 nGPUs = torch.cuda.device_count()
 if nGPUs==1:
     raise Exception("Only 1GPU available")
+
+#### DDP
 assert BS % nGPUs == 0
 
 def clone_layer_params(layer_params, device):
@@ -83,14 +85,21 @@ gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
 gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
 gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
 
-gpus_dloss_dp = [tlayer_ffn_bkwd(gpu_dloss_dx, gpu_layer_params, gpu_x)[1] for gpu_dloss_dx, gpu_layer_params, gpu_x  in zip(gpus_dloss_dx, gpus_layer_params, gpus_x)]
-gpus_ffn1_dloss_dp = [dloss_dp[0] for dloss_dp in gpus_dloss_dp]
-print("BEFORE REDUCE gpus_ffn1_dloss_dp", gpus_ffn1_dloss_dp)
-gpus_ffn2_dloss_dp = [dloss_dp[1] for dloss_dp in gpus_dloss_dp]
-nccl.all_reduce(gpus_ffn1_dloss_dp)
-print("AFTER REDUCE gpus_ffn1_dloss_dp", gpus_ffn1_dloss_dp)
-nccl.all_reduce(gpus_ffn2_dloss_dp)
-assert torch.allclose(gpus_ffn1_dloss_dp[0], dloss_dp[0]), f"gpus_ffn1_dloss_dp[0] {gpus_ffn1_dloss_dp[0]} dloss_dp[0] {dloss_dp[0]}"
-assert torch.allclose(gpus_ffn2_dloss_dp[0], dloss_dp[1]), f"gpus_ffn1_dloss_dp[1] {gpus_ffn1_dloss_dp[1]} dloss_dp[1] {dloss_dp[1]}"
+def tlayer_ffn_bkwd_wrapper(gpu_args):
+    return tlayer_ffn_bkwd(gpu_args[0], gpu_args[1], gpu_args[2])[1]
 
-#### DDP
+if __name__ == '__main__':
+    mp.set_start_method('spawn')
+    with mp.Pool(nGPUs) as p:
+        gpus_args = zip(gpus_dloss_dx, gpus_layer_params, gpus_x) 
+        gpus_dloss_dp = p.map(tlayer_ffn_bkwd_wrapper, gpus_args)
+    #gpus_dloss_dp = [tlayer_ffn_bkwd(gpu_dloss_dx, gpu_layer_params, gpu_x)[1] for gpu_dloss_dx, gpu_layer_params, gpu_x  in zip(gpus_dloss_dx, gpus_layer_params, gpus_x)]
+    
+    gpus_ffn1_dloss_dp = [dloss_dp[0] for dloss_dp in gpus_dloss_dp]
+    print("BEFORE REDUCE gpus_ffn1_dloss_dp", gpus_ffn1_dloss_dp)
+    gpus_ffn2_dloss_dp = [dloss_dp[1] for dloss_dp in gpus_dloss_dp]
+    nccl.all_reduce(gpus_ffn1_dloss_dp)
+    print("AFTER REDUCE gpus_ffn1_dloss_dp", gpus_ffn1_dloss_dp)
+    nccl.all_reduce(gpus_ffn2_dloss_dp)
+    assert torch.allclose(gpus_ffn1_dloss_dp[0], dloss_dp[0]), f"gpus_ffn1_dloss_dp[0] {gpus_ffn1_dloss_dp[0]} dloss_dp[0] {dloss_dp[0]}"
+    assert torch.allclose(gpus_ffn2_dloss_dp[0], dloss_dp[1]), f"gpus_ffn1_dloss_dp[1] {gpus_ffn1_dloss_dp[1]} dloss_dp[1] {dloss_dp[1]}"
