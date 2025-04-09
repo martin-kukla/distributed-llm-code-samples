@@ -10,10 +10,8 @@ if nGPUs==1:
 
 ### PARAMS + MODEL
 
-DEVICE = "cuda"
-
 def init_linear_layer(m, n, scale=2e-2): 
-    return scale * torch.randn((n, m), device=DEVICE)
+    return scale * torch.randn((n, m), device=0) # TODO: define on CPU instead - cuda complains
     
 def init_tlayer_ffn(emb_dim, ffn_dim):
     return [init_linear_layer(emb_dim, ffn_dim)] +  [init_linear_layer(ffn_dim, emb_dim)]
@@ -44,6 +42,9 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 #### Training methods: 1GPU, DDP
 
 def train_step_1gpu(dloss_dx, layer_params, x):
+    x = x.cuda(0)
+    dloss_dx = dloss_dx.cuda(0)
+    layer_params = [p.cuda(0) for p in layer_params]
 
     # Forward
     y = tlayer_ffn_fwd(layer_params, x)
@@ -83,7 +84,7 @@ def train_step_ddp(dloss_dx, layer_params, x):
     nccl.all_reduce(gpus_ffn2_dloss_dp)   
 
     # Optimizer step (just SGD for now)
-    n_layer_params = [p-0.001*g for p, g in zip(layer_params, (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
+    n_layer_params = [p-0.001*g for p, g in zip(gpus_layer_params[0], (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
 
     return n_layer_params
 
@@ -91,8 +92,8 @@ def train_step_ddp(dloss_dx, layer_params, x):
 
 BS, D = 8, 4 #32, 16
 FFN = 4 * D
-x = torch.randn((BS, D), device="cuda")
-dloss_dx = torch.randn((BS, D), device="cuda")
+x = torch.randn((BS, D))
+dloss_dx = torch.randn((BS, D))
 layer_params = init_tlayer_ffn(D, FFN)
 
 if __name__ == '__main__':
