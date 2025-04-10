@@ -8,6 +8,8 @@ nGPUs = torch.cuda.device_count()
 if nGPUs==1:
     raise Exception("Only 1GPU available")
 
+lr = 0.1
+
 
 ### PARAMS + MODEL
 
@@ -55,15 +57,16 @@ def train_1gpu(dloss_dx, layer_params, x, steps=2):
         _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)
         
         # Optimizer step (just SGD for now)
-        layer_params = [p-0.001*g for p, g in zip(layer_params, dloss_dp)]
+        layer_params = [p-lr*g for p, g in zip(layer_params, dloss_dp)]
     
     return layer_params
 
 
 def tlayer_ffn_bkwd_wrapper(gpu_args):
+        _, gpu_args, _ = gpu_args
         return tlayer_ffn_bkwd(gpu_args[0], gpu_args[1], gpu_args[2])[1]
 
-def train_ddp(dloss_dx, layer_params, x, steps=2):
+def _train_ddp(dloss_dx, layer_params, x, steps=2):
     assert BS % nGPUs == 0
 
     mp.set_start_method('spawn')
@@ -75,9 +78,11 @@ def train_ddp(dloss_dx, layer_params, x, steps=2):
         gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
         gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
         gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
+        gpus_dloss_dp = [None]*nGPUs
     
         with mp.Pool(nGPUs) as p:
-            gpus_args = zip(gpus_dloss_dx, gpus_layer_params, gpus_x) 
+            gpus_args = zip(gpus_dloss_dx, gpus_layer_params, gpus_x)
+            gpus_args = [(i, gpu_args, gpus_dloss_dp) for i, gpu_args in enumerate(gpus_args)]
             gpus_dloss_dp = p.map(tlayer_ffn_bkwd_wrapper, gpus_args)
         #gpus_dloss_dp = [tlayer_ffn_bkwd(gpu_dloss_dx, gpu_layer_params, gpu_x)[1] for gpu_dloss_dx, gpu_layer_params, gpu_x  in zip(gpus_dloss_dx, gpus_layer_params, gpus_x)]
     
@@ -87,13 +92,67 @@ def train_ddp(dloss_dx, layer_params, x, steps=2):
         nccl.all_reduce(gpus_ffn2_dloss_dp)   
     
         # Optimizer step (just SGD for now)
-        layer_params = [p-0.001*g for p, g in zip(gpus_layer_params[0], (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
+        layer_params = [p-lr*g for p, g in zip(gpus_layer_params[0], (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
 
     return layer_params
 
+def train_ddp_process(gpu_args):
+    local_rank, gpu_args = gpu_args
+    dloss_dx, layer_params, x = gpu_args
+
+    for _ in range(steps):
+        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
+        # NB, for some reason, if I use set_, the results will not be visible to the other processes?!
+        gpus_dloss_dp[local_rank][0].add_(dloss_dp[0])
+        gpus_dloss_dp[local_rank][1].add_(dloss_dp[1])
+        
+        barrier.wait()
+        if local_rank==0:
+            gpus_ffn1_dloss_dp = [dloss_dp[0] for dloss_dp in gpus_dloss_dp]
+            gpus_ffn2_dloss_dp = [dloss_dp[1] for dloss_dp in gpus_dloss_dp]
+            nccl.all_reduce(gpus_ffn1_dloss_dp)
+            nccl.all_reduce(gpus_ffn2_dloss_dp)   
+        barrier.wait()
+        
+        layer_params = [p-lr*g for p, g in zip(layer_params, (gpus_dloss_dp[local_rank][0], gpus_dloss_dp[local_rank][1]))]
+        gpus_dloss_dp[local_rank][0].zero_()
+        gpus_dloss_dp[local_rank][1].zero_()
+
+    return layer_params
+
+def init_pool_processes(the_barrier, the_gpus_dloss_dp, the_steps):
+    global barrier
+    barrier = the_barrier
+    global gpus_dloss_dp
+    gpus_dloss_dp = the_gpus_dloss_dp
+    global steps
+    steps = the_steps
+    
+def train_ddp(dloss_dx, layer_params, x, steps=2):
+    assert BS % nGPUs == 0
+
+    def clone_layer_params(layer_params, device):
+        return tuple([torch.clone(p).cuda(device) for p in layer_params])
+    gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)] 
+    gpus_x = torch.chunk(x, nGPUs, dim=0)
+    gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
+    gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
+    gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
+    dloss_dp = tuple([torch.zeros_like(p) for p in layer_params])
+    gpus_dloss_dp = [clone_layer_params(dloss_dp, i) for i in range(nGPUs)]
+
+    mp.set_start_method('spawn')
+    barrier = mp.Barrier(nGPUs)
+    with mp.Pool(nGPUs, initializer=init_pool_processes, initargs=(barrier, gpus_dloss_dp, steps)) as p:
+        gpus_args = zip(gpus_dloss_dx, gpus_layer_params, gpus_x)
+        gpus_args = [(i, gpu_args) for i, gpu_args in enumerate(gpus_args)]
+        gpus_layer_params = p.map(train_ddp_process, gpus_args)
+
+    return gpus_layer_params[0]
+
 #### Setup:
 
-ITERS = 10
+ITERS = 2
 BS, D = 8, 4 #32, 16
 FFN = 4 * D
 x = torch.randn((BS, D))
