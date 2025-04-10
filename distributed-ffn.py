@@ -1,3 +1,4 @@
+import argparse
 import math
 import torch
 import torch.cuda.nccl as nccl
@@ -160,15 +161,22 @@ dloss_dx = torch.randn((BS, D))
 layer_params = init_tlayer_ffn(D, FFN)
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--mode', type=int, default=0)
+    args = parser.parse_args()
 
-    t0 = time.time()
-    n_layer_params_1gpu = train_1gpu(dloss_dx, layer_params, x, ITERS)
-    t1 = time.time()
-    print(f'n_layer_params_1gpu takes {t1-t0} seconds: ', n_layer_params_1gpu)
-    t0 = time.time()
-    n_layer_params_ddp = train_ddp(dloss_dx, layer_params, x, ITERS)
-    t1 = time.time()
-    print(f'n_layer_params_ddp takes {t1-t0} seconds: ', n_layer_params_ddp)
-    
-    assert torch.allclose(n_layer_params_ddp[0], n_layer_params_1gpu[0]), f"n_layer_params_ddp[0] {n_layer_params_ddp[0]} n_layer_params_1gpu[0] {n_layer_params_1gpu[0]}"
-    assert torch.allclose(n_layer_params_ddp[1], n_layer_params_1gpu[1]), f"n_layer_params_ddp[1] {n_layer_params_ddp[1]} n_layer_params_1gpu[1] {n_layer_params_1gpu[1]}"
+    if args.mode==0 or args.mode==1:
+        t0 = time.time()
+        n_layer_params_1gpu = train_1gpu(dloss_dx, layer_params, x, ITERS)
+        t1 = time.time()
+        print(f'n_layer_params_1gpu takes {t1-t0} seconds: ', n_layer_params_1gpu)
+
+    if args.mode==0 or args.mode==2:
+        t0 = time.time()
+        n_layer_params_ddp = train_ddp(dloss_dx, layer_params, x, ITERS)
+        t1 = time.time()
+        print(f'n_layer_params_ddp takes {t1-t0} seconds: ', n_layer_params_ddp)
+
+    if args.mode==0:
+        assert torch.allclose(n_layer_params_ddp[0], n_layer_params_1gpu[0]), f"n_layer_params_ddp[0] {n_layer_params_ddp[0]} n_layer_params_1gpu[0] {n_layer_params_1gpu[0]}"
+        assert torch.allclose(n_layer_params_ddp[1], n_layer_params_1gpu[1]), f"n_layer_params_ddp[1] {n_layer_params_ddp[1]} n_layer_params_1gpu[1] {n_layer_params_1gpu[1]}"
