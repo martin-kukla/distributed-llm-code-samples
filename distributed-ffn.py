@@ -15,7 +15,7 @@ LR = 0.000001 # 0.1 for testing
 ### PARAMS + MODEL
 
 def init_linear_layer(m, n, scale=2e-2): 
-    return scale * torch.randn((n, m), device=0) # TODO: define on CPU instead - cuda complains
+    return scale * torch.randn((n, m))
     
 def init_tlayer_ffn(emb_dim, ffn_dim):
     return [init_linear_layer(emb_dim, ffn_dim)] +  [init_linear_layer(ffn_dim, emb_dim)]
