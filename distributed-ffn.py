@@ -62,41 +62,6 @@ def train_1gpu(dloss_dx, layer_params, x, steps=2):
     
     return layer_params
 
-
-def tlayer_ffn_bkwd_wrapper(gpu_args):
-        _, gpu_args, _ = gpu_args
-        return tlayer_ffn_bkwd(gpu_args[0], gpu_args[1], gpu_args[2])[1]
-
-def _train_ddp(dloss_dx, layer_params, x, steps=2):
-    assert BS % nGPUs == 0
-
-    mp.set_start_method('spawn')
-    for _ in range(steps):
-        def clone_layer_params(layer_params, device):
-            return tuple([torch.clone(p).cuda(device) for p in layer_params])
-        gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)] 
-        gpus_x = torch.chunk(x, nGPUs, dim=0)
-        gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
-        gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
-        gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
-        gpus_dloss_dp = [None]*nGPUs
-    
-        with mp.Pool(nGPUs) as p:
-            gpus_args = zip(gpus_dloss_dx, gpus_layer_params, gpus_x)
-            gpus_args = [(i, gpu_args, gpus_dloss_dp) for i, gpu_args in enumerate(gpus_args)]
-            gpus_dloss_dp = p.map(tlayer_ffn_bkwd_wrapper, gpus_args)
-        #gpus_dloss_dp = [tlayer_ffn_bkwd(gpu_dloss_dx, gpu_layer_params, gpu_x)[1] for gpu_dloss_dx, gpu_layer_params, gpu_x  in zip(gpus_dloss_dx, gpus_layer_params, gpus_x)]
-    
-        gpus_ffn1_dloss_dp = [dloss_dp[0] for dloss_dp in gpus_dloss_dp]
-        gpus_ffn2_dloss_dp = [dloss_dp[1] for dloss_dp in gpus_dloss_dp]
-        nccl.all_reduce(gpus_ffn1_dloss_dp)
-        nccl.all_reduce(gpus_ffn2_dloss_dp)   
-    
-        # Optimizer step (just SGD for now)
-        layer_params = [p-LR*g for p, g in zip(gpus_layer_params[0], (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
-
-    return layer_params
-
 def train_ddp_process(gpu_args):
     local_rank, gpu_args = gpu_args
     dloss_dx, layer_params, x = gpu_args
