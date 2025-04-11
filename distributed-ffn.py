@@ -9,7 +9,7 @@ nGPUs = torch.cuda.device_count()
 if nGPUs==1:
     raise Exception("Only 1GPU available")
 
-LR = 0.0001 # 0.1 for testing
+LR = 0.000001 # 0.1 for testing
 
 
 ### PARAMS + MODEL
@@ -160,23 +160,32 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--model_size', type=int, default=4)
     parser.add_argument('-m', '--mode', type=int, default=0)
     args = parser.parse_args()
+    
+    print(f'ARGS:\n iters:{args.iters}\n BS:{args.batch_size}\n D:{args.model_size}\n')
 
     x = torch.randn((args.batch_size, args.model_size))
     dloss_dx = torch.randn((args.batch_size, args.model_size))
     layer_params = init_tlayer_ffn(args.model_size, 4*args.model_size)
+
+    num_params = sum([p.numel() for p in layer_params])
+    def _gb(t_numel):
+        return 4*t_numel/(1024 * 1024 * 1024)
+    print(f'INPUT: {x.numel():_} (size {_gb(x.numel())} GB )')
+    print(f'PARAMS: {num_params:_} (size {_gb(num_params)} GB)')
+    print(f'\n')
     
 
     if args.mode==0 or args.mode==1:
         t0 = time.time()
         n_layer_params_1gpu = train_1gpu(dloss_dx, layer_params, x, args.iters)
         t1 = time.time()
-        print(f'n_layer_params_1gpu takes {t1-t0} seconds: ', n_layer_params_1gpu)
+        print(f'n_layer_params_1gpu takes {t1-t0} seconds: ', n_layer_params_1gpu[0][:5,:5], n_layer_params_1gpu[1][:5,:5])
 
     if args.mode==0 or args.mode==2:
         t0 = time.time()
         n_layer_params_ddp = train_ddp(dloss_dx, layer_params, x, args.iters)
         t1 = time.time()
-        print(f'n_layer_params_ddp takes {t1-t0} seconds: ', n_layer_params_ddp)
+        print(f'n_layer_params_ddp takes {t1-t0} seconds: ', n_layer_params_ddp[0][:5,:5], n_layer_params_ddp[1][:5,:5])
 
     if args.mode==0:
         assert torch.allclose(n_layer_params_ddp[0], n_layer_params_1gpu[0]), f"n_layer_params_ddp[0] {n_layer_params_ddp[0]} n_layer_params_1gpu[0] {n_layer_params_1gpu[0]}"
