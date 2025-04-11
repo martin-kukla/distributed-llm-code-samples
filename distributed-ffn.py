@@ -9,7 +9,7 @@ nGPUs = torch.cuda.device_count()
 if nGPUs==1:
     raise Exception("Only 1GPU available")
 
-lr = 0.1
+LR = 0.0001 # 0.1 for testing
 
 
 ### PARAMS + MODEL
@@ -58,7 +58,7 @@ def train_1gpu(dloss_dx, layer_params, x, steps=2):
         _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)
         
         # Optimizer step (just SGD for now)
-        layer_params = [p-lr*g for p, g in zip(layer_params, dloss_dp)]
+        layer_params = [p-LR*g for p, g in zip(layer_params, dloss_dp)]
     
     return layer_params
 
@@ -93,7 +93,7 @@ def _train_ddp(dloss_dx, layer_params, x, steps=2):
         nccl.all_reduce(gpus_ffn2_dloss_dp)   
     
         # Optimizer step (just SGD for now)
-        layer_params = [p-lr*g for p, g in zip(gpus_layer_params[0], (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
+        layer_params = [p-LR*g for p, g in zip(gpus_layer_params[0], (gpus_ffn1_dloss_dp[0], gpus_ffn2_dloss_dp[0]))]
 
     return layer_params
 
@@ -115,7 +115,7 @@ def train_ddp_process(gpu_args):
             nccl.all_reduce(gpus_ffn2_dloss_dp)   
         barrier.wait()
         
-        layer_params = [p-lr*g for p, g in zip(layer_params, (gpus_dloss_dp[local_rank][0], gpus_dloss_dp[local_rank][1]))]
+        layer_params = [p-LR*g for p, g in zip(layer_params, (gpus_dloss_dp[local_rank][0], gpus_dloss_dp[local_rank][1]))]
         gpus_dloss_dp[local_rank][0].zero_()
         gpus_dloss_dp[local_rank][1].zero_()
 
@@ -130,7 +130,7 @@ def init_pool_processes(the_barrier, the_gpus_dloss_dp, the_steps):
     steps = the_steps
     
 def train_ddp(dloss_dx, layer_params, x, steps=2):
-    assert BS % nGPUs == 0
+    assert dloss_dx.shape[0] % nGPUs == 0
 
     def clone_layer_params(layer_params, device):
         return tuple([torch.clone(p).cuda(device) for p in layer_params])
@@ -153,27 +153,28 @@ def train_ddp(dloss_dx, layer_params, x, steps=2):
 
 #### Setup:
 
-ITERS = 2
-BS, D = 8, 4 #32, 16
-FFN = 4 * D
-x = torch.randn((BS, D))
-dloss_dx = torch.randn((BS, D))
-layer_params = init_tlayer_ffn(D, FFN)
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('-i', '--iters', type=int, default=1)
+    parser.add_argument('-bs', '--batch_size', type=int, default=8)
+    parser.add_argument('-d', '--model_size', type=int, default=4)
     parser.add_argument('-m', '--mode', type=int, default=0)
     args = parser.parse_args()
 
+    x = torch.randn((args.batch_size, args.model_size))
+    dloss_dx = torch.randn((args.batch_size, args.model_size))
+    layer_params = init_tlayer_ffn(args.model_size, 4*args.model_size)
+    
+
     if args.mode==0 or args.mode==1:
         t0 = time.time()
-        n_layer_params_1gpu = train_1gpu(dloss_dx, layer_params, x, ITERS)
+        n_layer_params_1gpu = train_1gpu(dloss_dx, layer_params, x, args.iters)
         t1 = time.time()
         print(f'n_layer_params_1gpu takes {t1-t0} seconds: ', n_layer_params_1gpu)
 
     if args.mode==0 or args.mode==2:
         t0 = time.time()
-        n_layer_params_ddp = train_ddp(dloss_dx, layer_params, x, ITERS)
+        n_layer_params_ddp = train_ddp(dloss_dx, layer_params, x, args.iters)
         t1 = time.time()
         print(f'n_layer_params_ddp takes {t1-t0} seconds: ', n_layer_params_ddp)
 
