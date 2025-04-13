@@ -10,6 +10,15 @@ outputs = [None] * nGPUs
 
 # do I need torch.cuda.synchronize() here?
 
+# import os
+# os.environ['MASTER_ADDR'] = '127.0.0.1'
+# os.environ['MASTER_PORT'] = '29500'
+# breakpoint()
+# torch.distributed.init_process_group(backend="nccl", world_size=1, rank=0)
+#for i in range(nGPUs):
+#    with torch.cuda.device(i):
+#        torch.distributed.init_process_group(backend="nccl", world_size=nGPUs, rank=i)
+        
 # PyTorch's bug: https://github.com/pytorch/pytorch/issues/38019
 # uid = nccl.unique_id()
 # print(uid)
