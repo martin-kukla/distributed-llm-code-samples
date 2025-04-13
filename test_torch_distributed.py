@@ -11,7 +11,13 @@ def run(rank, size):
     group = dist.new_group([0, 1, 2, 3])
     for i in range(10):
         tensor = torch.ones(1).cuda(rank)
-        dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=group)
+        s = torch.cuda.Stream()
+        handle = dist.all_reduce(tensor, op=dist.ReduceOp.SUM, group=group, async_op=True)
+        handle.wait()
+        with torch.cuda.stream(s):
+            # Here I could put some concurent op
+            s.wait_stream(torch.cuda.default_stream())
+            tensor.add_(100)
         print('Iter', i, 'Rank ', rank, ' has data ', tensor[0])
 
 def init_process(rank, size, fn, backend='nccl'):
