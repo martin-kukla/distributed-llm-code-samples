@@ -45,12 +45,18 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
 #### Training methods: 1GPU, DDP
 
-def train_1gpu(dloss_dx, layer_params, x, steps=2):
-    x = x.cuda(0)
-    dloss_dx = dloss_dx.cuda(0)
+def train_1gpu(layer_params, seeds, batch_size, steps=2):
+    gen=torch.Generator()
+    model_size = layer_params[0].shape[1]
+    
     layer_params = [p.cuda(0) for p in layer_params]
 
-    for _ in range(steps):
+    for seed in seeds.numpy().tolist():
+        # Get data
+        gen.manual_seed(seed)
+        x = torch.randn((batch_size, model_size), generator=gen).cuda(0)
+        dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(0)
+        
         # Forward
         y = tlayer_ffn_fwd(layer_params, x)
         
@@ -118,43 +124,47 @@ def train_ddp(dloss_dx, layer_params, x, steps=2):
 
 import os
 import torch.distributed as dist
-def train_ddp_process2(local_rank, dloss_dx, layer_params, x, steps):
+def train_ddp_process2(local_rank, layer_params, seeds, batch_size):
     # Probably we don't need to specify it explicitly, as the default group will do. TODO: confirm
     #group = dist.new_group(range(nGPUs))
+    gen=torch.Generator()
+    model_size = layer_params[0].shape[1]
 
-    for _ in range(steps):
+    for seed in seeds.numpy().tolist():
+        # get data
+        gen.manual_seed(seed)
+        x = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
+        dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
+        
         dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
 
         dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM) #, group=group)       
         dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM) #, group=group)
         
         #in place
-        for p, g in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
-            p.add_(-LR*g)
+        for param, grad in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
+            param.add_(-LR*grad)
 
-def init_process2(rank, x, layer_params, dloss_dx, fn, steps):
+def init_process2(rank, layer_params, seeds, batch_size, fn):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     dist.init_process_group("nccl", rank=rank, world_size=nGPUs)
     
-    fn(rank, x, layer_params, dloss_dx, steps)
+    fn(rank, layer_params, seeds, batch_size)
     
-def train_ddp2(dloss_dx, layer_params, x, steps=2):
-    assert dloss_dx.shape[0] % nGPUs == 0
+def train_ddp2(layer_params, seeds, batch_size):
+    assert len(seeds) % nGPUs == 0
 
     def clone_layer_params(layer_params, device):
         return tuple([torch.clone(p).cuda(device) for p in layer_params])
     gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)] 
-    gpus_x = torch.chunk(x, nGPUs, dim=0)
-    gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
-    gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
-    gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
+    cpus_seeds = [t.reshape(-1) for t in seeds.reshape((-1, nGPUs)).chunk(nGPUs, dim=1)]
 
     processes = []
     mp.set_start_method('spawn')
     for rank in range(nGPUs):
-        p = mp.Process(target=init_process2, args=(rank, gpus_dloss_dx[rank], gpus_layer_params[rank], gpus_x[rank], train_ddp_process2, steps))
+        p = mp.Process(target=init_process2, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_ddp_process2))
         p.start()
         processes.append(p)
 
@@ -175,27 +185,27 @@ if __name__ == '__main__':
     
     print(f'ARGS:\n iters:{args.iters}\n BS:{args.batch_size}\n D:{args.model_size}\n')
 
-    x = torch.randn((args.batch_size, args.model_size))
-    dloss_dx = torch.randn((args.batch_size, args.model_size))
+    seeds = torch.randint(100_000, (args.iters,)) # substitite for dataset
     layer_params = init_tlayer_ffn(args.model_size, 4*args.model_size)
 
     num_params = sum([p.numel() for p in layer_params])
     def _gb(t_numel):
         return 4*t_numel/(1024 * 1024 * 1024)
-    print(f'INPUT: {x.numel():_} (size {_gb(x.numel())} GB )')
     print(f'PARAMS: {num_params:_} (size {_gb(num_params)} GB)')
     print(f'\n')
+
+    print(f'initial layer_params', layer_params[0][:5,:5], layer_params[1][:5,:5])
     
 
     if args.mode==0 or args.mode==1:
         t0 = time.time()
-        n_layer_params_1gpu = train_1gpu(dloss_dx, layer_params, x, args.iters)
+        n_layer_params_1gpu = train_1gpu(layer_params, seeds, args.batch_size)
         t1 = time.time()
         print(f'n_layer_params_1gpu takes {t1-t0} seconds: ', n_layer_params_1gpu[0][:5,:5], n_layer_params_1gpu[1][:5,:5])
 
     if args.mode==0 or args.mode==2:
         t0 = time.time()
-        n_layer_params_ddp = train_ddp2(dloss_dx, layer_params, x, args.iters)
+        n_layer_params_ddp = train_ddp2(layer_params, seeds, args.batch_size)
         t1 = time.time()
         print(f'n_layer_params_ddp takes {t1-t0} seconds: ', n_layer_params_ddp[0][:5,:5], n_layer_params_ddp[1][:5,:5])
 
