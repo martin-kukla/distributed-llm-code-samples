@@ -1,7 +1,9 @@
 import argparse
 import math
+import os
 import torch
-import torch.cuda.nccl as nccl
+import torch.distributed as dist # we will use init_process_group and communication collectives (all_reduce, all_gather and reduce_scatter)
+#import torch.cuda.nccl as nccl
 import multiprocessing as mp
 import time
 
@@ -43,7 +45,9 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
     return dloss_dx.reshape(x_in.shape), (ffn1_dloss_dp, ffn2_dloss_dp)
 
-#### Training methods: 1GPU, DDP
+#### Training methods: 1GPU, DDP, FSDP
+
+# 1 GPU
 
 def train_1gpu(layer_params, seeds, batch_size, steps=2):
     gen=torch.Generator()
@@ -68,63 +72,9 @@ def train_1gpu(layer_params, seeds, batch_size, steps=2):
     
     return layer_params
 
-def train_ddp_process(gpu_args):
-    local_rank, gpu_args = gpu_args
-    dloss_dx, layer_params, x = gpu_args
+# DDP
 
-    for _ in range(steps):
-        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
-        # NB, for some reason, if I use set_, the results will not be visible to the other processes?!
-        gpus_dloss_dp[local_rank][0].add_(dloss_dp[0])
-        gpus_dloss_dp[local_rank][1].add_(dloss_dp[1])
-        
-        barrier.wait()
-        if local_rank==0:
-            gpus_ffn1_dloss_dp = [dloss_dp[0] for dloss_dp in gpus_dloss_dp]
-            gpus_ffn2_dloss_dp = [dloss_dp[1] for dloss_dp in gpus_dloss_dp]
-            nccl.all_reduce(gpus_ffn1_dloss_dp)
-            nccl.all_reduce(gpus_ffn2_dloss_dp)   
-        barrier.wait()
-        
-        layer_params = [p-LR*g for p, g in zip(layer_params, (gpus_dloss_dp[local_rank][0], gpus_dloss_dp[local_rank][1]))]
-        gpus_dloss_dp[local_rank][0].zero_()
-        gpus_dloss_dp[local_rank][1].zero_()
-
-    return layer_params
-
-def init_pool_processes(the_barrier, the_gpus_dloss_dp, the_steps):
-    global barrier
-    barrier = the_barrier
-    global gpus_dloss_dp
-    gpus_dloss_dp = the_gpus_dloss_dp
-    global steps
-    steps = the_steps
-    
-def train_ddp(dloss_dx, layer_params, x, steps=2):
-    assert dloss_dx.shape[0] % nGPUs == 0
-
-    def clone_layer_params(layer_params, device):
-        return tuple([torch.clone(p).cuda(device) for p in layer_params])
-    gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)] 
-    gpus_x = torch.chunk(x, nGPUs, dim=0)
-    gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
-    gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
-    gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
-    dloss_dp = tuple([torch.zeros_like(p) for p in layer_params])
-    gpus_dloss_dp = [clone_layer_params(dloss_dp, i) for i in range(nGPUs)]
-
-    mp.set_start_method('spawn')
-    barrier = mp.Barrier(nGPUs)
-    with mp.Pool(nGPUs, initializer=init_pool_processes, initargs=(barrier, gpus_dloss_dp, steps)) as p:
-        gpus_args = zip(gpus_dloss_dx, gpus_layer_params, gpus_x)
-        gpus_args = [(i, gpu_args) for i, gpu_args in enumerate(gpus_args)]
-        gpus_layer_params = p.map(train_ddp_process, gpus_args)
-
-    return gpus_layer_params[0]
-
-import os
-import torch.distributed as dist
-def train_ddp_process2(local_rank, layer_params, seeds, batch_size):
+def train_process_ddp(local_rank, layer_params, seeds, batch_size):
     # Probably we don't need to specify it explicitly, as the default group will do. TODO: confirm
     #group = dist.new_group(range(nGPUs))
     gen=torch.Generator()
@@ -148,7 +98,7 @@ def train_ddp_process2(local_rank, layer_params, seeds, batch_size):
         for param, grad in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
             param.add_(-LR*grad)
 
-def init_process2(rank, layer_params, seeds, batch_size, fn):
+def init_process_ddp(rank, layer_params, seeds, batch_size, fn):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
@@ -156,7 +106,7 @@ def init_process2(rank, layer_params, seeds, batch_size, fn):
     
     fn(rank, layer_params, seeds, batch_size)
     
-def train_ddp2(layer_params, seeds, batch_size):
+def train_ddp(layer_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
 
     def clone_layer_params(layer_params, device):
@@ -167,7 +117,7 @@ def train_ddp2(layer_params, seeds, batch_size):
     processes = []
     mp.set_start_method('spawn')
     for rank in range(nGPUs):
-        p = mp.Process(target=init_process2, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_ddp_process2))
+        p = mp.Process(target=init_process_ddp, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_process_ddp))
         p.start()
         processes.append(p)
 
@@ -188,7 +138,7 @@ if __name__ == '__main__':
     
     print(f'ARGS:\n iters:{args.iters}\n BS:{args.batch_size}\n D:{args.model_size}\n')
 
-    seeds = torch.randint(100_000, (args.iters,)) # substitite for dataset
+    seeds = torch.randint(100_000, (args.iters,)) # mock for dataset
     layer_params = init_tlayer_ffn(args.model_size, 4*args.model_size)
 
     num_params = sum([p.numel() for p in layer_params])
@@ -208,7 +158,7 @@ if __name__ == '__main__':
 
     if args.mode==0 or args.mode==2:
         t0 = time.time()
-        n_layer_params_ddp = train_ddp2(layer_params, seeds, args.batch_size)
+        n_layer_params_ddp = train_ddp(layer_params, seeds, args.batch_size)
         t1 = time.time()
         print(f'n_layer_params_ddp takes {t1-t0} seconds: ', n_layer_params_ddp[0][:5,:5], n_layer_params_ddp[1][:5,:5])
 
