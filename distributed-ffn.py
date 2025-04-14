@@ -9,7 +9,7 @@ nGPUs = torch.cuda.device_count()
 if nGPUs==1:
     raise Exception("Only 1GPU available")
 
-LR = 0.000001 # 0.1 for testing
+LR = 0.00001 # 0.1 for testing
 
 
 ### PARAMS + MODEL
@@ -55,7 +55,7 @@ def train_1gpu(dloss_dx, layer_params, x, steps=2):
         y = tlayer_ffn_fwd(layer_params, x)
         
         # Backward
-        _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)
+        _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)       
         
         # Optimizer step (just SGD for now)
         layer_params = [p-LR*g for p, g in zip(layer_params, dloss_dp)]
@@ -116,6 +116,52 @@ def train_ddp(dloss_dx, layer_params, x, steps=2):
 
     return gpus_layer_params[0]
 
+import os
+import torch.distributed as dist
+def train_ddp_process2(local_rank, dloss_dx, layer_params, x, steps):
+    #group = dist.new_group(range(nGPUs))
+
+    for _ in range(steps):
+        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
+
+        dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM) #, group=group)       
+        dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM) #, group=group)
+        
+        #in place
+        for p, g in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
+            p.add_(-LR*g)
+
+def init_process2(rank, x, layer_params, dloss_dx, fn, steps):
+    """ Initialize the distributed environment. """
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '29500'
+    dist.init_process_group("nccl", rank=rank, world_size=nGPUs)
+    
+    fn(rank, x, layer_params, dloss_dx, steps)
+    
+def train_ddp2(dloss_dx, layer_params, x, steps=2):
+    assert dloss_dx.shape[0] % nGPUs == 0
+
+    def clone_layer_params(layer_params, device):
+        return tuple([torch.clone(p).cuda(device) for p in layer_params])
+    gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)] 
+    gpus_x = torch.chunk(x, nGPUs, dim=0)
+    gpus_x = [gpu_x.cuda(i) for i, gpu_x in enumerate(gpus_x)]
+    gpus_dloss_dx = torch.chunk(dloss_dx, nGPUs, dim=0)
+    gpus_dloss_dx = [gpu_dloss_dx.cuda(i) for i, gpu_dloss_dx in enumerate(gpus_dloss_dx)]
+
+    processes = []
+    mp.set_start_method('spawn')
+    for rank in range(nGPUs):
+        p = mp.Process(target=init_process2, args=(rank, gpus_dloss_dx[rank], gpus_layer_params[rank], gpus_x[rank], train_ddp_process2, steps))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+    return gpus_layer_params[0]
+
 #### Setup:
 
 if __name__ == '__main__':
@@ -148,7 +194,7 @@ if __name__ == '__main__':
 
     if args.mode==0 or args.mode==2:
         t0 = time.time()
-        n_layer_params_ddp = train_ddp(dloss_dx, layer_params, x, args.iters)
+        n_layer_params_ddp = train_ddp2(dloss_dx, layer_params, x, args.iters)
         t1 = time.time()
         print(f'n_layer_params_ddp takes {t1-t0} seconds: ', n_layer_params_ddp[0][:5,:5], n_layer_params_ddp[1][:5,:5])
 
