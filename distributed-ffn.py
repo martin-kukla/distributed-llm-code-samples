@@ -72,8 +72,16 @@ def train_1gpu(layer_params, seeds, batch_size, steps=2):
     
     return layer_params
 
+# Multi-GPU
+def init_process(rank, layer_params, seeds, batch_size, fn):
+    """ Initialize the distributed environment. """
+    os.environ['MASTER_ADDR'] = '127.0.0.1'
+    os.environ['MASTER_PORT'] = '29500'
+    dist.init_process_group("nccl", rank=rank, world_size=nGPUs)
+    
+    fn(rank, layer_params, seeds, batch_size)
+    
 # DDP
-
 def train_process_ddp(local_rank, layer_params, seeds, batch_size):
     # Probably we don't need to specify it explicitly, as the default group will do. TODO: confirm
     #group = dist.new_group(range(nGPUs))
@@ -97,15 +105,7 @@ def train_process_ddp(local_rank, layer_params, seeds, batch_size):
         # Optimzer (in place)
         for param, grad in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
             param.add_(-LR*grad)
-
-def init_process_ddp(rank, layer_params, seeds, batch_size, fn):
-    """ Initialize the distributed environment. """
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = '29500'
-    dist.init_process_group("nccl", rank=rank, world_size=nGPUs)
-    
-    fn(rank, layer_params, seeds, batch_size)
-    
+  
 def train_ddp(layer_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
 
@@ -117,7 +117,7 @@ def train_ddp(layer_params, seeds, batch_size):
     processes = []
     mp.set_start_method('spawn')
     for rank in range(nGPUs):
-        p = mp.Process(target=init_process_ddp, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_process_ddp))
+        p = mp.Process(target=init_process, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_process_ddp))
         p.start()
         processes.append(p)
 
