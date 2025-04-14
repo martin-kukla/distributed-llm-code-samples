@@ -135,13 +135,16 @@ def train_ddp_process2(local_rank, layer_params, seeds, batch_size):
         gen.manual_seed(seed)
         x = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
         dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
-        
-        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
 
+        # Forward
+        y = tlayer_ffn_fwd(layer_params, x)
+
+        # Backward
+        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
         dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM) #, group=group)       
         dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM) #, group=group)
         
-        #in place
+        # Optimzer (in place)
         for param, grad in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
             param.add_(-LR*grad)
 
