@@ -119,6 +119,7 @@ def train_ddp(dloss_dx, layer_params, x, steps=2):
 import os
 import torch.distributed as dist
 def train_ddp_process2(local_rank, dloss_dx, layer_params, x, steps):
+    # Probably we don't need to specify it explicitly, as the default group will do. TODO: confirm
     #group = dist.new_group(range(nGPUs))
 
     for _ in range(steps):
