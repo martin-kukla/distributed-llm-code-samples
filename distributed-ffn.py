@@ -135,15 +135,15 @@ def train_ddp(layer_params, seeds, batch_size):
     return gpus_layer_params[0]
 
 # FSDP
-def train_process_fsdp(local_rank, layer_params, seeds, batch_size):
+def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
     # Probably we don't need to specify it explicitly, as the default group will do. TODO: confirm
     #group = dist.new_group(range(nGPUs))
     gen=torch.Generator()
 
-    sharded_p0 = layer_params[0]
+    sharded_p0 = chunked_layer_params[0]
     sharded_p0s = [torch.zeros_like(sharded_p0).cuda(local_rank) for _ in range(nGPUs)]
     dist.all_gather(sharded_p0s, sharded_p0) 
-    sharded_p1 = layer_params[1]
+    sharded_p1 = chunked_layer_params[1]
     sharded_p1s = [torch.zeros_like(sharded_p1).cuda(local_rank) for _ in range(nGPUs)]
     dist.all_gather(sharded_p1s, sharded_p1)
     
@@ -164,11 +164,14 @@ def train_process_fsdp(local_rank, layer_params, seeds, batch_size):
 
         # Backward
         dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
-        dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM) #, group=group)       
-        dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM) #, group=group)
+        chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layer_params])
+        def chunk_g(g, dim=0):
+            return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
+        dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM) #, group=group)       
+        dist.reduce_scatter(chunked_dloss_dp[1], chunk_g(dloss_dp[1], dim=1), op=dist.ReduceOp.SUM) #, group=group)
         
         # Optimzer (in place)
-        for param, grad in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
+        for param, grad in zip(chunked_layer_params, (chunked_dloss_dp[0], chunked_dloss_dp[1])):
             param.add_(-LR*grad)
   
 def train_fsdp(layer_params, seeds, batch_size):
@@ -216,14 +219,16 @@ if __name__ == '__main__':
     print(f'initial layer_params', layer_params[0][:5,:5], layer_params[1][:5,:5])
     
     fns = [train_1gpu, train_ddp, train_fsdp]
+    fns_layer_params = []
     mp.set_start_method('spawn')
     for i, fn in enumerate(fns):
         if args.mode==0 or args.mode==i+1:
             t0 = time.time()
-            fn_layer_params = fn(layer_params, seeds, args.batch_size)
+            fn_layer_params = fn(layer_params, seeds, args.batch_size) # TODO: move to CPU
             t1 = time.time()
+            fns_layer_params.append(fn_layer_params)
             print(f'{fn.__name__} takes {t1-t0} seconds: ', fn_layer_params[0].shape, fn_layer_params[0][:5,:5], fn_layer_params[1].shape, fn_layer_params[1][:5,:5])
 
-    # if args.mode==0:
-    #     assert torch.allclose(n_layer_params_ddp[0], n_layer_params_1gpu[0]), f"n_layer_params_ddp[0] {n_layer_params_ddp[0]} n_layer_params_1gpu[0] {n_layer_params_1gpu[0]}"
-    #     assert torch.allclose(n_layer_params_ddp[1], n_layer_params_1gpu[1]), f"n_layer_params_ddp[1] {n_layer_params_ddp[1]} n_layer_params_1gpu[1] {n_layer_params_1gpu[1]}"
+    if args.mode==0:
+        assert torch.allclose(fns_layer_params[1][0], fns_layer_params[2][0]), f"ddp[0] {fns_layer_params[1][0]} fsdp[0] {fns_layer_params[2][0]}"
+        assert torch.allclose(fns_layer_params[1][1], fns_layer_params[2][1]), f"ddp[1] {fns_layer_params[1][1]} fsdp[1] {fns_layer_params[2][1]}"
