@@ -1,7 +1,7 @@
 # This is a toy example how to distribute the computation of Transformer's FFN sublocks among GPUs
 # It shows how to implmement DDP and FSDP almost from the first principle:
 # Initially, I meant to use torch.cuda.nccl directly, but there is a known issue (https://github.com/pytorch/pytorch/issues/38019).
-# Thus, using torch.distributed's init_process_group + its communication collectives (I believe this still being relatively thin wrapper for NCCL)
+# Thus, using torch.distributed's init_process_group + its communication collectives (I believe this still being relatively a thin wrapper for NCCL)
 #
 # To test, run "python distributed-ffn.py --iters 16 --batch_size 8192 --model_size 8192 --method M", where M is one of:
 #   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
@@ -75,13 +75,18 @@ def train_1gpu(layers_params, seeds, batch_size):
         dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(0)
         
         # Forward
-        y = tlayer_ffn_fwd(layers_params[0], x)
+        y=x
+        acts = []
+        for l in layers_params:
+            acts.append(y)
+            y = tlayer_ffn_fwd(l, y)
         
-        # Backward
-        _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layers_params[0], x)       
+        # Backward + optimizer (just SGD for now)
+        batch_dloss_dx = dloss_dx
+        for i in reversed(range(len(layers_params))):
+            batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])       
         
-        # Optimizer step (just SGD for now)
-        layers_params[0] = [p-LR*g for p, g in zip(layers_params[0], dloss_dp)]
+            layers_params[i] = [p-LR*g for p, g in zip(layers_params[i], dloss_dp)]
     
     return layers_params
 
@@ -106,16 +111,22 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size):
         dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
 
         # Forward
-        y = tlayer_ffn_fwd(layers_params[0], x)
+        y=x
+        acts = []
+        for l in layers_params:
+            acts.append(y)
+            y = tlayer_ffn_fwd(l, y)
 
-        # Backward
-        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layers_params[0], x)[1]
-        dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM)    
-        dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM)
-        
-        # Optimzer (in place)
-        for param, grad in zip(layers_params[0], (dloss_dp[0], dloss_dp[1])):
-            param.add_(-LR*grad)
+        # Backward + optimizer (in-place SGD)
+        batch_dloss_dx = dloss_dx
+        for i in reversed(range(len(layers_params))):
+            batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])  
+            dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM)    
+            dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM)
+
+            # Optimzer (in place)
+            for param, grad in zip(layers_params[i], (dloss_dp[0], dloss_dp[1])):
+                param.add_(-LR*grad)
   
 def train_ddp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
