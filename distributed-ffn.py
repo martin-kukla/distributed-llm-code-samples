@@ -96,8 +96,6 @@ def init_process(rank, layers_params, seeds, batch_size, fn):
     
 # DDP
 def train_process_ddp(local_rank, layers_params, seeds, batch_size):
-    # Probably we don't need to specify it explicitly, as the default group will do. TODO: confirm
-    #group = dist.new_group(range(nGPUs))
     gen=torch.Generator()
     model_size = layers_params[0][0].shape[1]
 
@@ -112,8 +110,8 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size):
 
         # Backward
         dloss_dp = tlayer_ffn_bkwd(dloss_dx, layers_params[0], x)[1]
-        dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM) #, group=group)       
-        dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM) #, group=group)
+        dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM)    
+        dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM)
         
         # Optimzer (in place)
         for param, grad in zip(layers_params[0], (dloss_dp[0], dloss_dp[1])):
@@ -142,8 +140,6 @@ def train_ddp(layers_params, seeds, batch_size):
 
 # FSDP
 def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
-    # Probably we don't need to specify it explicitly, as the default group will do. TODO: confirm
-    #group = dist.new_group(range(nGPUs))
     gen=torch.Generator()
 
     sharded_p0 = chunked_layer_params[0]
@@ -170,8 +166,8 @@ def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
         chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layer_params])
         def chunk_g(g, dim=0):
             return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
-        dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM) #, group=group)       
-        dist.reduce_scatter(chunked_dloss_dp[1], chunk_g(dloss_dp[1], dim=1), op=dist.ReduceOp.SUM) #, group=group)
+        dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
+        dist.reduce_scatter(chunked_dloss_dp[1], chunk_g(dloss_dp[1], dim=1), op=dist.ReduceOp.SUM)
         
         # Optimzer (in place)
         for param, grad in zip(chunked_layer_params, (chunked_dloss_dp[0], chunked_dloss_dp[1])):
