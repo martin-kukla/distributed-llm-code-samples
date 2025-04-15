@@ -227,7 +227,9 @@ if __name__ == '__main__':
             fn_layer_params = fn(layer_params, seeds, args.batch_size) # TODO: move to CPU
             t1 = time.time()
             fns_layer_params.append(fn_layer_params)
-            print(f'{fn.__name__} takes {t1-t0} seconds: ', fn_layer_params[0].shape, fn_layer_params[0][:5,:5], fn_layer_params[1].shape, fn_layer_params[1][:5,:5])
+            print(f'\n{fn.__name__} takes {t1-t0} seconds')
+            print(f'final {fn.__name__} layer_params', fn_layer_params[0].shape, fn_layer_params[1].shape)
+            print(f'final {fn.__name__} layer_params', fn_layer_params[0][:5,:5], fn_layer_params[1][:5,:5])
 
     if args.mode==0:
         assert torch.allclose(fns_layer_params[1][0], fns_layer_params[2][0]), f"ddp[0] {fns_layer_params[1][0]} fsdp[0] {fns_layer_params[2][0]}"
