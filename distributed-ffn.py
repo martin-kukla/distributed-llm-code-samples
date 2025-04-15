@@ -148,10 +148,7 @@ def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
     dist.all_gather(sharded_p1s, sharded_p1)
     
     layer_params = (torch.cat(sharded_p0s), torch.cat(sharded_p1s, dim=1))
-    #if local_rank==0:
-    #    print(f'local_rank {local_rank}', layer_params[0].shape, layer_params[1].shape)
-    #    print(f'local_rank {local_rank}', layer_params[0], layer_params[1])
-    model_size = layer_params[0].shape[1]
+    model_size = chunked_layer_params[0].shape[1]
 
     for seed in seeds.numpy().tolist():
         # get data
