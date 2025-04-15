@@ -1,9 +1,12 @@
-# This is a toy example how to distribute Transformer's FFN sublocks among many GPUs
+# This is a toy example how to distribute the computation of Transformer's FFN sublocks among GPUs
 # It shows how to implmement DDP and FSDP almost from the first principle:
 # Initially, I meant to use torch.cuda.nccl directly, but there is a known issue (https://github.com/pytorch/pytorch/issues/38019).
-# Thus, using torch.distributed's init_process_group + its communication collectives.
+# Thus, using torch.distributed's init_process_group + its communication collectives (I believe this still being relatively thin wrapper for NCCL)
 #
-# To test, run python distributed-ffn.py -i 16 -bs 8192 -d 8192
+# To test, run "python distributed-ffn.py --iters 16 --batch_size 8192 --model_size 8192 --mode M", where M is one of:
+#   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
+#
+# NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
 #
 # Remaining TODO: overlap communication with computation 
 
