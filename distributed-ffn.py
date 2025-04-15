@@ -3,7 +3,7 @@
 # Initially, I meant to use torch.cuda.nccl directly, but there is a known issue (https://github.com/pytorch/pytorch/issues/38019).
 # Thus, using torch.distributed's init_process_group + its communication collectives (I believe this still being relatively thin wrapper for NCCL)
 #
-# To test, run "python distributed-ffn.py --iters 16 --batch_size 8192 --model_size 8192 --mode M", where M is one of:
+# To test, run "python distributed-ffn.py --iters 16 --batch_size 8192 --model_size 8192 --method M", where M is one of:
 #   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
@@ -61,7 +61,9 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
 # 1 GPU
 
-def train_1gpu(layer_params, seeds, batch_size, steps=2):
+def train_1gpu(layers_params, seeds, batch_size):
+    layer_params = layers_params[0]
+    
     gen=torch.Generator()
     model_size = layer_params[0].shape[1]
     
@@ -82,16 +84,16 @@ def train_1gpu(layer_params, seeds, batch_size, steps=2):
         # Optimizer step (just SGD for now)
         layer_params = [p-LR*g for p, g in zip(layer_params, dloss_dp)]
     
-    return layer_params
+    return [layer_params]
 
 # Multi-GPU
-def init_process(rank, layer_params, seeds, batch_size, fn):
+def init_process(rank, layers_params, seeds, batch_size, fn):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     dist.init_process_group("nccl", rank=rank, world_size=nGPUs)
     
-    fn(rank, layer_params, seeds, batch_size)
+    fn(rank, layers_params, seeds, batch_size)
     
 # DDP
 def train_process_ddp(local_rank, layer_params, seeds, batch_size):
@@ -118,7 +120,8 @@ def train_process_ddp(local_rank, layer_params, seeds, batch_size):
         for param, grad in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
             param.add_(-LR*grad)
   
-def train_ddp(layer_params, seeds, batch_size):
+def train_ddp(layers_params, seeds, batch_size):
+    layer_params = layers_params[0]
     assert len(seeds) % nGPUs == 0
 
     def clone_layer_params(layer_params, device):
@@ -135,7 +138,7 @@ def train_ddp(layer_params, seeds, batch_size):
     for p in processes:
         p.join()
 
-    return gpus_layer_params[0]
+    return [gpus_layer_params[0]]
 
 # FSDP
 def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
@@ -174,7 +177,8 @@ def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
         for param, grad in zip(chunked_layer_params, (chunked_dloss_dp[0], chunked_dloss_dp[1])):
             param.add_(-LR*grad)
   
-def train_fsdp(layer_params, seeds, batch_size):
+def train_fsdp(layers_params, seeds, batch_size):
+    layer_params = layers_params[0]
     assert len(seeds) % nGPUs == 0
 
     def chunk_p(p, dim):
@@ -192,7 +196,7 @@ def train_fsdp(layer_params, seeds, batch_size):
     for p in processes:
         p.join()
     
-    return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))
+    return [(torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))]
     
 #### Setup:
 
@@ -200,37 +204,39 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--iters', type=int, default=1)
     parser.add_argument('-bs', '--batch_size', type=int, default=8)
+    parser.add_argument('-l', '--layers', type=int, default=1)
     parser.add_argument('-d', '--model_size', type=int, default=4)
-    parser.add_argument('-m', '--mode', type=int, default=0)
+    parser.add_argument('-m', '--method', type=int, default=0)
     args = parser.parse_args()
     
     print(f'ARGS:\n iters:{args.iters}\n BS:{args.batch_size}\n D:{args.model_size}\n')
 
     seeds = torch.randint(100_000, (args.iters,)) # mock for dataset
-    layer_params = init_tlayer_ffn(args.model_size, 4*args.model_size)
+    layers_params = [init_tlayer_ffn(args.model_size, 4*args.model_size) for _ in range(args.layers)]
 
-    num_params = sum([p.numel() for p in layer_params])
+    num_params = sum([p.numel() for layer_params in layers_params for p in layer_params ])
     def _gb(t_numel):
         return 4*t_numel/(1024 * 1024 * 1024)
     print(f'PARAMS: {num_params:_} (size {_gb(num_params)} GB)')
     print(f'\n')
 
-    print(f'initial layer_params', layer_params[0].shape, layer_params[1].shape)
-    print(f'initial layer_params', layer_params[0][:5,:5], layer_params[1][:5,:5])
+    
+    print(f'initial layers_params[0]', layers_params[0][0].shape, layers_params[0][1].shape)
+    print(f'initial layers_params[0]', layers_params[0][0][:5,:5], layers_params[0][1][:5,:5])
     
     fns = [train_1gpu, train_ddp, train_fsdp]
-    fns_layer_params = []
+    fns_layers_params = []
     mp.set_start_method('spawn')
     for i, fn in enumerate(fns):
-        if args.mode==0 or args.mode==i+1:
+        if args.method==0 or args.method==i+1:
             t0 = time.time()
-            fn_layer_params = fn(layer_params, seeds, args.batch_size) # TODO: move to CPU
+            fn_layers_params = fn(layers_params, seeds, args.batch_size) # TODO: move to CPU
             t1 = time.time()
-            fns_layer_params.append(fn_layer_params)
+            fns_layers_params.append(fn_layers_params)
             print(f'\n{fn.__name__} takes {t1-t0} seconds')
-            print(f'final {fn.__name__} layer_params', fn_layer_params[0].shape, fn_layer_params[1].shape)
-            print(f'final {fn.__name__} layer_params', fn_layer_params[0][:5,:5], fn_layer_params[1][:5,:5])
+            print(f'final {fn.__name__} layers_params[0]', fn_layers_params[0][0].shape, fn_layers_params[0][1].shape)
+            print(f'final {fn.__name__} layers_params[0]', fn_layers_params[0][0][:5,:5], fn_layers_params[0][1][:5,:5])
 
-    if args.mode==0:
-        assert torch.allclose(fns_layer_params[1][0], fns_layer_params[2][0]), f"ddp[0] {fns_layer_params[1][0]} fsdp[0] {fns_layer_params[2][0]}"
-        assert torch.allclose(fns_layer_params[1][1], fns_layer_params[2][1]), f"ddp[1] {fns_layer_params[1][1]} fsdp[1] {fns_layer_params[2][1]}"
+    if args.method==0: # Compare DDP against FSDP(with DDP)
+        assert torch.allclose(fns_layers_params[1][0][0], fns_layers_params[2][0][0]), f"ddp[0] {fns_layers_params[1][0][0]} fsdp[0] {fns_layers_params[2][0][0]}"
+        assert torch.allclose(fns_layers_params[1][0][1], fns_layers_params[2][0][1]), f"ddp[1] {fns_layers_params[1][0][1]} fsdp[1] {fns_layers_params[2][0][1]}"
