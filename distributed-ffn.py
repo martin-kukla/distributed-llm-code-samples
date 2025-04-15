@@ -62,12 +62,11 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 # 1 GPU
 
 def train_1gpu(layers_params, seeds, batch_size):
-    layer_params = layers_params[0]
-    
     gen=torch.Generator()
-    model_size = layer_params[0].shape[1]
-    
-    layer_params = [p.cuda(0) for p in layer_params]
+    model_size = layers_params[0][0].shape[1]
+
+    move_l = lambda l: [p.cuda(0) for p in l]
+    layers_params = [move_l(l) for l in layers_params]
 
     for seed in seeds.numpy().tolist():
         # Get data
@@ -76,15 +75,15 @@ def train_1gpu(layers_params, seeds, batch_size):
         dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(0)
         
         # Forward
-        y = tlayer_ffn_fwd(layer_params, x)
+        y = tlayer_ffn_fwd(layers_params[0], x)
         
         # Backward
-        _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)       
+        _, dloss_dp = tlayer_ffn_bkwd(dloss_dx, layers_params[0], x)       
         
         # Optimizer step (just SGD for now)
-        layer_params = [p-LR*g for p, g in zip(layer_params, dloss_dp)]
+        layers_params[0] = [p-LR*g for p, g in zip(layers_params[0], dloss_dp)]
     
-    return [layer_params]
+    return layers_params
 
 # Multi-GPU
 def init_process(rank, layers_params, seeds, batch_size, fn):
@@ -96,11 +95,11 @@ def init_process(rank, layers_params, seeds, batch_size, fn):
     fn(rank, layers_params, seeds, batch_size)
     
 # DDP
-def train_process_ddp(local_rank, layer_params, seeds, batch_size):
+def train_process_ddp(local_rank, layers_params, seeds, batch_size):
     # Probably we don't need to specify it explicitly, as the default group will do. TODO: confirm
     #group = dist.new_group(range(nGPUs))
     gen=torch.Generator()
-    model_size = layer_params[0].shape[1]
+    model_size = layers_params[0][0].shape[1]
 
     for seed in seeds.numpy().tolist():
         # get data
@@ -109,36 +108,37 @@ def train_process_ddp(local_rank, layer_params, seeds, batch_size):
         dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
 
         # Forward
-        y = tlayer_ffn_fwd(layer_params, x)
+        y = tlayer_ffn_fwd(layers_params[0], x)
 
         # Backward
-        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
+        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layers_params[0], x)[1]
         dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM) #, group=group)       
         dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM) #, group=group)
         
         # Optimzer (in place)
-        for param, grad in zip(layer_params, (dloss_dp[0], dloss_dp[1])):
+        for param, grad in zip(layers_params[0], (dloss_dp[0], dloss_dp[1])):
             param.add_(-LR*grad)
   
 def train_ddp(layers_params, seeds, batch_size):
-    layer_params = layers_params[0]
     assert len(seeds) % nGPUs == 0
 
     def clone_layer_params(layer_params, device):
         return tuple([torch.clone(p).cuda(device) for p in layer_params])
-    gpus_layer_params = [clone_layer_params(layer_params, i) for i in range(nGPUs)] 
+    def clone_layers_params(layers_params, device):
+        return [clone_layer_params(l, device) for l in layers_params]
+    gpus_layers_params = [clone_layers_params(layers_params, i) for i in range(nGPUs)] 
     cpus_seeds = [t.reshape(-1) for t in seeds.reshape((-1, nGPUs)).chunk(nGPUs, dim=1)]
 
     processes = []
     for rank in range(nGPUs):
-        p = mp.Process(target=init_process, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_process_ddp))
+        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, train_process_ddp))
         p.start()
         processes.append(p)
 
     for p in processes:
         p.join()
 
-    return [gpus_layer_params[0]]
+    return gpus_layers_params[0]
 
 # FSDP
 def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
