@@ -124,7 +124,6 @@ def train_ddp(layer_params, seeds, batch_size):
     cpus_seeds = [t.reshape(-1) for t in seeds.reshape((-1, nGPUs)).chunk(nGPUs, dim=1)]
 
     processes = []
-    mp.set_start_method('spawn')
     for rank in range(nGPUs):
         p = mp.Process(target=init_process, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_process_ddp))
         p.start()
@@ -182,7 +181,6 @@ def train_fsdp(layer_params, seeds, batch_size):
     cpus_seeds = [t.reshape(-1) for t in seeds.reshape((-1, nGPUs)).chunk(nGPUs, dim=1)]
 
     processes = []
-    mp.set_start_method('spawn')
     for rank in range(nGPUs):
         p = mp.Process(target=init_process, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_process_fsdp))
         p.start()
@@ -218,6 +216,7 @@ if __name__ == '__main__':
     print(f'initial layer_params', layer_params[0][:5,:5], layer_params[1][:5,:5])
     
     fns = [train_1gpu, train_ddp, train_fsdp]
+    mp.set_start_method('spawn')
     for i, fn in enumerate(fns):
         if args.mode==0 or args.mode==i+1:
             t0 = time.time()
