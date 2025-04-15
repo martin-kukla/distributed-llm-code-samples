@@ -190,8 +190,8 @@ def train_fsdp(layer_params, seeds, batch_size):
 
     for p in processes:
         p.join()
-
-    return gpus_layer_params[0]
+    
+    return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))
     
 #### Setup:
 
