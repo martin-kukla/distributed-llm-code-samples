@@ -1,14 +1,20 @@
 # This is a toy example how to distribute the computation of Transformer's FFN sublocks among GPUs
-# It shows how to implmement DDP and FSDP almost from the first principle:
-# Initially, I meant to use torch.cuda.nccl directly, but there is a known issue (https://github.com/pytorch/pytorch/issues/38019).
-# Thus, using torch.distributed's init_process_group + its communication collectives (I believe this still being relatively a thin wrapper for NCCL)
+# It shows how to implmement DDP and FSDP from the first principle (see the asterisk below).
 #
-# To test, run "python distributed-ffns.py --iters 16 --batch_size 8192 --model_size 8192 --method M", where M is one of:
+# To test, run "python distributed-ffns.py --iters 16 --batch_size 8192 --layers 1 --model_size 8192 --method M", where M is one of:
 #   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
+#
+# To see the advantage of FSDP over DDP, one can check the following config if running on the GPUs with 24GB memory:
+# "python distributed-ffns.py --iters 4 --batch_size 8192 --model_size 8192 --layers 8 --method 3".
+# This will result in over 4B model (16GB of space). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
 #
-# Remaining TODO: overlap communication with computation 
+# Remaining TODO: in order to improve speed, overlap communication with computation (see another branch in the repo)
+#
+# (The asterisk: I use the NCCL through torch.distributed package i.e. I use its init_process_group() method and its communication collectives e.g. all_reduce.
+# I meant to use torch.cuda.nccl directly, but there is a known issue: https://github.com/pytorch/pytorch/issues/38019.
+# Using torch.distributed package slightly simplifies coding up the communication between GPUs, but this is still relatively a thin wrapper for NCCL.)
 
 import argparse
 import math
@@ -233,9 +239,9 @@ if __name__ == '__main__':
     parser.add_argument('-m', '--method', type=int, default=0)
     args = parser.parse_args()
     
-    print(f'ARGS:\n iters:{args.iters}\n BS:{args.batch_size}\n D:{args.model_size}\n')
+    print(f'ARGS:\n iters: {args.iters}\n BS: {args.batch_size}\n D: {args.model_size}\n FFN: 4*D\n')
 
-    seeds = torch.randint(100_000, (args.iters,)) # mock for dataset
+    seeds = torch.randint(100_000, (args.iters,)) # seeds for the random (mocked) dataset
     layers_params = [init_tlayer_ffn(args.model_size, 4*args.model_size) for _ in range(args.layers)]
 
     num_params = sum([p.numel() for layer_params in layers_params for p in layer_params ])
