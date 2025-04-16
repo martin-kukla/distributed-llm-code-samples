@@ -3,7 +3,7 @@
 # Initially, I meant to use torch.cuda.nccl directly, but there is a known issue (https://github.com/pytorch/pytorch/issues/38019).
 # Thus, using torch.distributed's init_process_group + its communication collectives (I believe this still being relatively a thin wrapper for NCCL)
 #
-# To test, run "python distributed-ffn.py --iters 16 --batch_size 8192 --model_size 8192 --method M", where M is one of:
+# To test, run "python distributed-ffns.py --iters 16 --batch_size 8192 --model_size 8192 --method M", where M is one of:
 #   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
@@ -150,7 +150,8 @@ def train_ddp(layers_params, seeds, batch_size):
     return gpus_layers_params[0]
 
 # FSDP
-def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
+def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
+    chunked_layer_params = chunked_layers_params[0]
     gen=torch.Generator()
 
     sharded_p0 = chunked_layer_params[0]
@@ -185,24 +186,29 @@ def train_process_fsdp(local_rank, chunked_layer_params, seeds, batch_size):
             param.add_(-LR*grad)
   
 def train_fsdp(layers_params, seeds, batch_size):
-    layer_params = layers_params[0]
     assert len(seeds) % nGPUs == 0
 
     def chunk_p(p, dim):
-       return [p_chunk.cuda(i) for i, p_chunk in enumerate(p.chunk(nGPUs, dim=dim))]
-    chunked_params = [chunk_p(p, dim=i%2) for i, p in enumerate(layer_params)]
-    gpus_layer_params = list(map(list, zip(*chunked_params)))
+        return [p_chunk.cuda(i) for i, p_chunk in enumerate(p.chunk(nGPUs, dim=dim))]
+    def chunk_l(l):
+        return [chunk_p(p, dim=i%2) for i, p in enumerate(l)]
+    chunked_layers_params = [chunk_l(l) for l in layers_params]
+    pre_gpus_layers_params = [list(map(list, zip(*chunked_l))) for chunked_l in chunked_layers_params]
+    concat_gpu_layers = lambda i: [l[i] for l in pre_gpus_layers_params]
+    gpus_layers_params = [concat_gpu_layers(i) for i in range(nGPUs)]
     cpus_seeds = [t.reshape(-1) for t in seeds.reshape((-1, nGPUs)).chunk(nGPUs, dim=1)]
 
     processes = []
     for rank in range(nGPUs):
-        p = mp.Process(target=init_process, args=(rank, gpus_layer_params[rank], cpus_seeds[rank], batch_size, train_process_fsdp))
+        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, train_process_fsdp))
         p.start()
         processes.append(p)
 
     for p in processes:
         p.join()
-    
+
+    # TODO: support L>1
+    gpus_layer_params = [gpus_layers_params[i][0] for i in range(nGPUs)]
     return [(torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))]
     
 #### Setup:
