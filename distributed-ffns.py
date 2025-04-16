@@ -151,18 +151,20 @@ def train_ddp(layers_params, seeds, batch_size):
 
 # FSDP
 def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
-    chunked_layer_params = chunked_layers_params[0]
     gen=torch.Generator()
-
-    sharded_p0 = chunked_layer_params[0]
-    sharded_p0s = [torch.zeros_like(sharded_p0).cuda(local_rank) for _ in range(nGPUs)]
-    dist.all_gather(sharded_p0s, sharded_p0) 
-    sharded_p1 = chunked_layer_params[1]
-    sharded_p1s = [torch.zeros_like(sharded_p1).cuda(local_rank) for _ in range(nGPUs)]
-    dist.all_gather(sharded_p1s, sharded_p1)
+    layers = len(chunked_layers_params)
+    model_size = chunked_layers_params[0][0].shape[1]
     
-    layer_params = (torch.cat(sharded_p0s), torch.cat(sharded_p1s, dim=1))
-    model_size = chunked_layer_params[0].shape[1]
+    def gather_layer_params(l):
+        sharded_p0 = chunked_layers_params[l][0]
+        sharded_p0s = [torch.zeros_like(sharded_p0).cuda(local_rank) for _ in range(nGPUs)]
+        dist.all_gather(sharded_p0s, sharded_p0) 
+        sharded_p1 = chunked_layers_params[l][1]
+        sharded_p1s = [torch.zeros_like(sharded_p1).cuda(local_rank) for _ in range(nGPUs)]
+        dist.all_gather(sharded_p1s, sharded_p1)
+        
+        return (torch.cat(sharded_p0s), torch.cat(sharded_p1s, dim=1))
+    
 
     for seed in seeds.numpy().tolist():
         # get data
@@ -171,19 +173,26 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
 
         # Forward
-        y = tlayer_ffn_fwd(layer_params, x)
+        y=x
+        acts = []
+        for l in range(layers):
+            acts.append(y)
+            layer_params = gather_layer_params(l)
+            y = tlayer_ffn_fwd(layer_params, y)
 
-        # Backward
-        dloss_dp = tlayer_ffn_bkwd(dloss_dx, layer_params, x)[1]
-        chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layer_params])
-        def chunk_g(g, dim=0):
-            return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
-        dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
-        dist.reduce_scatter(chunked_dloss_dp[1], chunk_g(dloss_dp[1], dim=1), op=dist.ReduceOp.SUM)
-        
-        # Optimzer (in place)
-        for param, grad in zip(chunked_layer_params, (chunked_dloss_dp[0], chunked_dloss_dp[1])):
-            param.add_(-LR*grad)
+        # Backward + optimizer (in-place SGD)
+        batch_dloss_dx = dloss_dx
+        for i in reversed(range(layers)):
+            layer_params = gather_layer_params(i)
+            batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
+            chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[i]]) # TODO: take outside
+            def chunk_g(g, dim=0):
+                return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
+            dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
+            dist.reduce_scatter(chunked_dloss_dp[1], chunk_g(dloss_dp[1], dim=1), op=dist.ReduceOp.SUM)
+
+            for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
+                param.add_(-LR*grad)
   
 def train_fsdp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
@@ -208,8 +217,10 @@ def train_fsdp(layers_params, seeds, batch_size):
         p.join()
 
     # TODO: support L>1
-    gpus_layer_params = [gpus_layers_params[i][0] for i in range(nGPUs)]
-    return [(torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))]
+    def concat_l(l):
+        gpus_layer_params = [gpus_layers_params[i][l] for i in range(nGPUs)]
+        return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))
+    return [concat_l(l) for l in range(len(layers_params))]
     
 #### Setup:
 
@@ -251,5 +262,6 @@ if __name__ == '__main__':
             print(f'final {fn.__name__} layers_params[0]', fn_layers_params[0][0][:5,:5], fn_layers_params[0][1][:5,:5])
 
     if args.method==0: # Compare DDP against FSDP(with DDP)
-        assert torch.allclose(fns_layers_params[1][0][0], fns_layers_params[2][0][0]), f"ddp[0] {fns_layers_params[1][0][0]} fsdp[0] {fns_layers_params[2][0][0]}"
-        assert torch.allclose(fns_layers_params[1][0][1], fns_layers_params[2][0][1]), f"ddp[1] {fns_layers_params[1][0][1]} fsdp[1] {fns_layers_params[2][0][1]}"
+        for l in range(args.layers):
+            assert torch.allclose(fns_layers_params[1][l][0], fns_layers_params[2][l][0]), f"L {l} ddp[0] {fns_layers_params[1][l][0]} fsdp[0] {fns_layers_params[2][l][0]}"
+            assert torch.allclose(fns_layers_params[1][l][1], fns_layers_params[2][l][1]), f"L {l} ddp[1] {fns_layers_params[1][l][1]} fsdp[1] {fns_layers_params[2][l][1]}"
