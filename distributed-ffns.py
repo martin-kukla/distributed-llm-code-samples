@@ -164,6 +164,7 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         dist.all_gather(sharded_p1s, sharded_p1)
         
         return (torch.cat(sharded_p0s), torch.cat(sharded_p1s, dim=1))
+    chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[0]]) # Buffers for results of ReduceScatter
     
 
     for seed in seeds.numpy().tolist():
@@ -185,7 +186,6 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         for i in reversed(range(layers)):
             layer_params = gather_layer_params(i)
             batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
-            chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[i]]) # TODO: take outside
             def chunk_g(g, dim=0):
                 return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
             dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
@@ -216,7 +216,6 @@ def train_fsdp(layers_params, seeds, batch_size):
     for p in processes:
         p.join()
 
-    # TODO: support L>1
     def concat_l(l):
         gpus_layer_params = [gpus_layers_params[i][l] for i in range(nGPUs)]
         return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))
