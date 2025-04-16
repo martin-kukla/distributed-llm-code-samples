@@ -24,6 +24,7 @@ if nGPUs==1:
     raise Exception("Only 1GPU available")
 
 LR = 0.00001 # 0.1 for testing
+DLOSS_DX_COEF = 0.1 # We imitatate loss function by randomized dloss_dx. We may want to scale them depending on the model size&iterations
 
 
 ### PARAMS + MODEL
@@ -72,7 +73,7 @@ def train_1gpu(layers_params, seeds, batch_size):
         # Get data
         gen.manual_seed(seed)
         x = torch.randn((batch_size, model_size), generator=gen).cuda(0)
-        dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(0)
+        dloss_dx = DLOSS_DX_COEF*torch.randn((batch_size, model_size), generator=gen).cuda(0) 
         
         # Forward
         y=x
@@ -108,7 +109,7 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size):
         # get data
         gen.manual_seed(seed)
         x = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
-        dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
+        dloss_dx = DLOSS_DX_COEF*torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
 
         # Forward
         y=x
@@ -171,7 +172,7 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         # get data
         gen.manual_seed(seed)
         x = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
-        dloss_dx = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
+        dloss_dx = DLOSS_DX_COEF*torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
 
         # Forward
         y=x
