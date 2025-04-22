@@ -199,13 +199,20 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         # Forward
         y=x
         acts = []
+        sharded_ps, handles = gather_layer_params(0)
+        for h in handles:
+            h.wait()
+        layer_params=(torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+                
         for l in range(layers):
             acts.append(y)
-            sharded_ps, handles = gather_layer_params(l)
-            for h in handles:
-                h.wait()
-            layer_params = (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+            if l< layers-1:
+                sharded_ps, handles = gather_layer_params(l+1)
             y = tlayer_ffn_fwd(layer_params, y)
+            if l< layers-1:
+                for h in handles:
+                    h.wait()
+                layer_params=(torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
 
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
@@ -214,6 +221,8 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
             for h in handles:
                 h.wait()
             layer_params = (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+            # if i>0:
+            #     sharded_ps, handles = gather_layer_params(i-i)
             batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
             def chunk_g(g, dim=0):
                 return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
@@ -222,6 +231,11 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
 
             for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
                 param.add_(-LR*grad)
+
+            # if i>0:
+            #     for h in handles:
+            #         h.wait()
+            #     layer_params = (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
   
 def train_fsdp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
