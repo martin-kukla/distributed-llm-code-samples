@@ -181,12 +181,12 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
     def gather_layer_params(l):
         sharded_p0 = chunked_layers_params[l][0]
         sharded_p0s = [torch.zeros_like(sharded_p0).cuda(local_rank) for _ in range(nGPUs)]
-        dist.all_gather(sharded_p0s, sharded_p0) 
+        handle0 = dist.all_gather(sharded_p0s, sharded_p0, async_op=True) 
         sharded_p1 = chunked_layers_params[l][1]
         sharded_p1s = [torch.zeros_like(sharded_p1).cuda(local_rank) for _ in range(nGPUs)]
-        dist.all_gather(sharded_p1s, sharded_p1)
-        
-        return (torch.cat(sharded_p0s), torch.cat(sharded_p1s, dim=1))
+        handle1 = dist.all_gather(sharded_p1s, sharded_p1, async_op=True)
+
+        return ([sharded_p0s, sharded_p1s], [handle0, handle1])
     chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[0]]) # Buffers for results of ReduceScatter
     
 
@@ -201,13 +201,19 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         acts = []
         for l in range(layers):
             acts.append(y)
-            layer_params = gather_layer_params(l)
+            sharded_ps, handles = gather_layer_params(l)
+            for h in handles:
+                h.wait()
+            layer_params = (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
             y = tlayer_ffn_fwd(layer_params, y)
 
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
         for i in reversed(range(layers)):
-            layer_params = gather_layer_params(i)
+            sharded_ps, handles = gather_layer_params(i)
+            for h in handles:
+                h.wait()
+            layer_params = (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
             batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
             def chunk_g(g, dim=0):
                 return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
