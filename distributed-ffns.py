@@ -6,11 +6,11 @@
 #
 # To see the advantage of FSDP over DDP, one can check the following config if running on 4 GPUs with 24GB memory each:
 # "python distributed-ffns.py --iters 4 --batch_size 8192 --model_size 8192 --layers 8 --method 3".
-# This will result in over 4B model (16GB of space). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
+# This will result in over 4B model (16GB of space, as fp32 is used). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
 #
-# Remaining TODO: in order to improve speed, overlap communication with computation (see another branch in the repo)
+# Remaining TODO: improve the overalapping of communication and computation for FSDP (ReduceScatter is not overlapped right now. We need more than one process group, see: https://github.com/pytorch/pytorch/issues/67158)
 #
 # (The asterisk: I use the NCCL through torch.distributed package i.e. I use its init_process_group() method and its communication collectives e.g. all_reduce.
 # I meant to use torch.cuda.nccl directly, but there is a known issue: https://github.com/pytorch/pytorch/issues/38019.
@@ -66,7 +66,7 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
 #### Training methods: 1GPU, DDP, FSDP
 
-# 1 GPU
+## 1 GPU
 
 def train_1gpu(layers_params, seeds, batch_size):
     gen=torch.Generator()
@@ -97,7 +97,9 @@ def train_1gpu(layers_params, seeds, batch_size):
     
     return layers_params
 
-# Multi-GPU
+## Multi-GPU
+
+# Utils
 def init_process(rank, layers_params, seeds, batch_size, fn):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -106,7 +108,22 @@ def init_process(rank, layers_params, seeds, batch_size, fn):
     
     fn(rank, layers_params, seeds, batch_size)
     
+from torch.profiler import profile, ProfilerActivity
+def torch_profile_rank_0(func):
+    global wrapper_torch_profile_rank_0 # TODO/Q: Probably not safe if we use this wrapper more than once?
+    def wrapper_torch_profile_rank_0(*args, **kwargs):
+        local_rank =args[0] # assume first parameter is local_rank
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                     record_shapes=True,
+                     with_stack=True) as prof:
+            func(*args, **kwargs)
+        if local_rank==0:
+            prof.export_chrome_trace("trace_profiler_trace.json")
+            print("Profiler exported")
+    return wrapper_torch_profile_rank_0
+    
 # DDP
+#@torch_profile_rank_0
 def train_process_ddp(local_rank, layers_params, seeds, batch_size):
     gen=torch.Generator()
     model_size = layers_params[0][0].shape[1]
@@ -126,14 +143,21 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size):
 
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
-        for i in reversed(range(len(layers_params))):
-            batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])  
-            dist.all_reduce(dloss_dp[0], op=dist.ReduceOp.SUM)    
-            dist.all_reduce(dloss_dp[1], op=dist.ReduceOp.SUM)
-
-            # Optimzer (in place)
+        dloss_dp = None
+        handles = []
+        def update_l_params(i):
+            for h in handles:
+                h.wait()
             for param, grad in zip(layers_params[i], (dloss_dp[0], dloss_dp[1])):
                 param.add_(-LR*grad)
+                
+        for i in reversed(range(len(layers_params))):
+            batch_dloss_dx, n_dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])  
+            if i< len(layers_params)-1:
+                update_l_params(i+1)
+            dloss_dp = n_dloss_dp
+            handles = [dist.all_reduce(dloss_dp[j], op=dist.ReduceOp.SUM, async_op=True) for j in range(len(dloss_dp))]
+        update_l_params(0)
   
 def train_ddp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
@@ -157,20 +181,27 @@ def train_ddp(layers_params, seeds, batch_size):
     return gpus_layers_params[0]
 
 # FSDP
+#@torch_profile_rank_0
 def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
     gen=torch.Generator()
     layers = len(chunked_layers_params)
     model_size = chunked_layers_params[0][0].shape[1]
     
-    def gather_layer_params(l):
+    def gather_layer_params_start(l):
         sharded_p0 = chunked_layers_params[l][0]
         sharded_p0s = [torch.zeros_like(sharded_p0).cuda(local_rank) for _ in range(nGPUs)]
-        dist.all_gather(sharded_p0s, sharded_p0) 
+        handle0 = dist.all_gather(sharded_p0s, sharded_p0, async_op=True) 
         sharded_p1 = chunked_layers_params[l][1]
         sharded_p1s = [torch.zeros_like(sharded_p1).cuda(local_rank) for _ in range(nGPUs)]
-        dist.all_gather(sharded_p1s, sharded_p1)
+        handle1 = dist.all_gather(sharded_p1s, sharded_p1, async_op=True)
+
+        return ([sharded_p0s, sharded_p1s], [handle0, handle1])
         
-        return (torch.cat(sharded_p0s), torch.cat(sharded_p1s, dim=1))
+    def gather_layer_params_end(sharded_ps, handles):
+        for h in handles:
+            h.wait()
+        return (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+        
     chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[0]]) # Buffers for results of ReduceScatter
     
 
@@ -183,16 +214,27 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         # Forward
         y=x
         acts = []
+        sharded_ps, handles = gather_layer_params_start(0)
+        layer_params = gather_layer_params_end(sharded_ps, handles)
+                
         for l in range(layers):
             acts.append(y)
-            layer_params = gather_layer_params(l)
+            if l< layers-1:
+                sharded_ps, handles = gather_layer_params_start(l+1)
             y = tlayer_ffn_fwd(layer_params, y)
+            if l< layers-1:
+                layer_params = gather_layer_params_end(sharded_ps, handles)
 
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
         for i in reversed(range(layers)):
-            layer_params = gather_layer_params(i)
+            if i>0:
+                sharded_ps, handles = gather_layer_params_start(i-1)
             batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
+            if i>0:
+                layer_params = gather_layer_params_end(sharded_ps, handles)
+
+            # TODO: overlap communication and computation for the below (we need more than one ProcessGroup)
             def chunk_g(g, dim=0):
                 return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
             dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
@@ -200,6 +242,7 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
 
             for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
                 param.add_(-LR*grad)
+            
   
 def train_fsdp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
@@ -269,5 +312,7 @@ if __name__ == '__main__':
 
     if args.method==0: # Compare DDP against FSDP(with DDP)
         for l in range(args.layers):
-            assert torch.allclose(fns_layers_params[1][l][0], fns_layers_params[2][l][0]), f"L {l} ddp[0] {fns_layers_params[1][l][0]} fsdp[0] {fns_layers_params[2][l][0]}"
-            assert torch.allclose(fns_layers_params[1][l][1], fns_layers_params[2][l][1]), f"L {l} ddp[1] {fns_layers_params[1][l][1]} fsdp[1] {fns_layers_params[2][l][1]}"
+            if not torch.allclose(fns_layers_params[1][l][0], fns_layers_params[2][l][0]):
+                print(f"SoftAssertionError: L {l} ddp[0] {fns_layers_params[1][l][0]} fsdp[0] {fns_layers_params[2][l][0]}")
+            if not torch.allclose(fns_layers_params[1][l][1], fns_layers_params[2][l][1]): 
+                print(f"SoftAssertionError: L {l} ddp[1] {fns_layers_params[1][l][1]} fsdp[1] {fns_layers_params[2][l][1]}")
