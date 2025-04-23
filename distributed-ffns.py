@@ -10,7 +10,7 @@
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
 #
-# Remaining TODO: in order to improve speed, overlap communication with computation (see another branch in the repo)
+# Remaining TODO: improve the overalapping of communication and computation for FSDP (ReduceScatter is not overlapped right now. We need more than one process group, see: https://github.com/pytorch/pytorch/issues/67158)
 #
 # (The asterisk: I use the NCCL through torch.distributed package i.e. I use its init_process_group() method and its communication collectives e.g. all_reduce.
 # I meant to use torch.cuda.nccl directly, but there is a known issue: https://github.com/pytorch/pytorch/issues/38019.
@@ -233,6 +233,8 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
             batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
             if i>0:
                 layer_params = gather_layer_params_end(sharded_ps, handles)
+
+            # TODO: overlap communication and computation for the below (we need more than one ProcessGroup)
             def chunk_g(g, dim=0):
                 return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
             dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
