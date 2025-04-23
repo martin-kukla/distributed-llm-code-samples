@@ -66,7 +66,7 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
 #### Training methods: 1GPU, DDP, FSDP
 
-# 1 GPU
+## 1 GPU
 
 def train_1gpu(layers_params, seeds, batch_size):
     gen=torch.Generator()
@@ -97,7 +97,9 @@ def train_1gpu(layers_params, seeds, batch_size):
     
     return layers_params
 
-# Multi-GPU
+## Multi-GPU
+
+# Utils
 def init_process(rank, layers_params, seeds, batch_size, fn):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -106,15 +108,25 @@ def init_process(rank, layers_params, seeds, batch_size, fn):
     
     fn(rank, layers_params, seeds, batch_size)
     
+from torch.profiler import profile, ProfilerActivity
+def torch_profile_rank_0(func):
+    global wrapper_torch_profile_rank_0 # TODO/Q: Probably not safe if we use this wrapper more than once?
+    def wrapper_torch_profile_rank_0(*args, **kwargs):
+        local_rank =args[0] # assume first parameter is local_rank
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                     record_shapes=True,
+                     with_stack=True) as prof:
+            func(*args, **kwargs)
+        if local_rank==0:
+            prof.export_chrome_trace("trace_profiler_trace.json")
+            print("Profiler exported")
+    return wrapper_torch_profile_rank_0
+    
 # DDP
-# from torch.profiler import profile, ProfilerActivity
+#@torch_profile_rank_0
 def train_process_ddp(local_rank, layers_params, seeds, batch_size):
     gen=torch.Generator()
     model_size = layers_params[0][0].shape[1]
-
-    # with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-    #              record_shapes=True,
-    #              with_stack=True) as prof:
 
     for seed in seeds.numpy().tolist():
         # get data
@@ -146,10 +158,6 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size):
             dloss_dp = n_dloss_dp
             handles = [dist.all_reduce(dloss_dp[j], op=dist.ReduceOp.SUM, async_op=True) for j in range(len(dloss_dp))]
         update_l_params(0)
-            
-    # if local_rank==0:
-    #     prof.export_chrome_trace("trace_profiler_trace.json")
-    #     print("Profiler exported")
   
 def train_ddp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
@@ -173,6 +181,7 @@ def train_ddp(layers_params, seeds, batch_size):
     return gpus_layers_params[0]
 
 # FSDP
+#@torch_profile_rank_0
 def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
     gen=torch.Generator()
     layers = len(chunked_layers_params)
@@ -231,7 +240,6 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
 
             for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
                 param.add_(-LR*grad)
-
             
   
 def train_fsdp(layers_params, seeds, batch_size):
