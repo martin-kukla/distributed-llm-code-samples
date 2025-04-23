@@ -6,7 +6,7 @@
 #
 # To see the advantage of FSDP over DDP, one can check the following config if running on 4 GPUs with 24GB memory each:
 # "python distributed-ffns.py --iters 4 --batch_size 8192 --model_size 8192 --layers 8 --method 3".
-# This will result in over 4B model (16GB of space). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
+# This will result in over 4B model (16GB of space, as fp32 is used). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
 #
@@ -178,7 +178,7 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
     layers = len(chunked_layers_params)
     model_size = chunked_layers_params[0][0].shape[1]
     
-    def gather_layer_params(l):
+    def gather_layer_params_start(l):
         sharded_p0 = chunked_layers_params[l][0]
         sharded_p0s = [torch.zeros_like(sharded_p0).cuda(local_rank) for _ in range(nGPUs)]
         handle0 = dist.all_gather(sharded_p0s, sharded_p0, async_op=True) 
@@ -187,6 +187,12 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         handle1 = dist.all_gather(sharded_p1s, sharded_p1, async_op=True)
 
         return ([sharded_p0s, sharded_p1s], [handle0, handle1])
+        
+    def gather_layer_params_end(sharded_ps, handles):
+        for h in handles:
+            h.wait()
+        return (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+        
     chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[0]]) # Buffers for results of ReduceScatter
     
 
@@ -199,30 +205,24 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         # Forward
         y=x
         acts = []
-        sharded_ps, handles = gather_layer_params(0)
-        for h in handles:
-            h.wait()
-        layer_params=(torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+        sharded_ps, handles = gather_layer_params_start(0)
+        layer_params = gather_layer_params_end(sharded_ps, handles)
                 
         for l in range(layers):
             acts.append(y)
             if l< layers-1:
-                sharded_ps, handles = gather_layer_params(l+1)
+                sharded_ps, handles = gather_layer_params_start(l+1)
             y = tlayer_ffn_fwd(layer_params, y)
             if l< layers-1:
-                for h in handles:
-                    h.wait()
-                layer_params=(torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+                layer_params = gather_layer_params_end(sharded_ps, handles)
 
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
         for i in reversed(range(layers)):
-            sharded_ps, handles = gather_layer_params(i)
-            for h in handles:
-                h.wait()
-            layer_params = (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+            sharded_ps, handles = gather_layer_params_start(i)
+            layer_params = gather_layer_params_end(sharded_ps, handles)
             # if i>0:
-            #     sharded_ps, handles = gather_layer_params(i-i)
+            #     sharded_ps, handles = gather_layer_params_start(i-i)
             batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
             def chunk_g(g, dim=0):
                 return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
@@ -233,9 +233,7 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
                 param.add_(-LR*grad)
 
             # if i>0:
-            #     for h in handles:
-            #         h.wait()
-            #     layer_params = (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+            #     layer_params = gather_layer_params_end(sharded_ps, handles)
   
 def train_fsdp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
