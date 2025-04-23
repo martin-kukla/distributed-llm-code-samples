@@ -219,11 +219,11 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
         for i in reversed(range(layers)):
-            sharded_ps, handles = gather_layer_params_start(i)
-            layer_params = gather_layer_params_end(sharded_ps, handles)
-            # if i>0:
-            #     sharded_ps, handles = gather_layer_params_start(i-i)
+            if i>0:
+                sharded_ps, handles = gather_layer_params_start(i-1)
             batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
+            if i>0:
+                layer_params = gather_layer_params_end(sharded_ps, handles)
             def chunk_g(g, dim=0):
                 return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
             dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
@@ -232,8 +232,7 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
             for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
                 param.add_(-LR*grad)
 
-            # if i>0:
-            #     layer_params = gather_layer_params_end(sharded_ps, handles)
+            
   
 def train_fsdp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
