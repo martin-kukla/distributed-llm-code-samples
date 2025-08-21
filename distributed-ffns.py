@@ -5,7 +5,7 @@
 #   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
 #
 # To see the advantage of FSDP over DDP, one can check the following config if running on 4 GPUs with 24GB memory each:
-# "python distributed-ffns.py --iters 4 --batch_size 6144 --model_size 8192 --layers 8 --method 3".
+# "python distributed-ffns.py --iters 4 --batch_size 8192 --model_size 8192 --layers 8 --method 3".
 # This will result in over 4B model (16GB of space, as fp32 is used). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
@@ -63,12 +63,11 @@ def tlayer_ffn_fwd(layer_params, x): # input: seq_len x emb_dim
 
 def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
     x_in = x
-    x_before_act = linear_fwd(layer_params[0], x)
-    x = t_relu_fwd(x_before_act)
+    x = linear_fwd(layer_params[0], x)
     
     # propagate back
-    ffn2_dloss_dp, dloss_dx = t_linear_bkwd(dloss_dx, layer_params[1], x)
-    dloss_dx = t_relu_bkwd_(dloss_dx, x_before_act)
+    ffn2_dloss_dp, dloss_dx = t_linear_bkwd(dloss_dx, layer_params[1], t_relu_fwd(x))
+    dloss_dx = t_relu_bkwd_(dloss_dx, x)
     ffn1_dloss_dp, dloss_dx = t_linear_bkwd(dloss_dx, layer_params[0], x_in)
 
     return dloss_dx.reshape(x_in.shape), (ffn1_dloss_dp, ffn2_dloss_dp)
