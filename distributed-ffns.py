@@ -1,11 +1,11 @@
 # This is a toy example how to distribute the computation of Transformer's FFN sublocks among GPUs
 # It shows how to implmement DDP and FSDP from the first principle (see the asterisk below).
 #
-# To test, run "python distributed-ffns.py --iters 16 --batch_size 8192 --layers 1 --model_size 8192 --method M", where M is one of:
+# To test, run "python distributed-ffns.py --iters 16 --batch_size 8 --seq_len 1024 --layers 1 --model_size 8192 --method M", where M is one of:
 #   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
 #
 # To see the advantage of FSDP over DDP, one can check the following config if running on 4 GPUs with 24GB memory each:
-# "python distributed-ffns.py --iters 4 --batch_size 8192 --model_size 8192 --layers 8 --method 3".
+# "python distributed-ffns.py --iters 4 --batch_size 8 --seq_len 1024 --model_size 8192 --layers 8 --method 3".
 # This will result in over 4B model (16GB of space, as fp32 is used). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
@@ -285,12 +285,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--iters', type=int, default=1)
     parser.add_argument('-bs', '--batch_size', type=int, default=8)
+    parser.add_argument('-n', '--seq_len', type=int, default=1024)
     parser.add_argument('-l', '--layers', type=int, default=1)
     parser.add_argument('-d', '--model_size', type=int, default=4)
     parser.add_argument('-m', '--method', type=int, default=0)
     args = parser.parse_args()
     
-    print(f'ARGS:\n iters: {args.iters}\n BS: {args.batch_size}\n D: {args.model_size}\n FFN: 4*D\n')
+    print(f'ARGS:\n iters: {args.iters}\n BS: {args.batch_size}\n N: {args.seq_len}\n D: {args.model_size}\n FFN: {4*args.model_size}\n')
 
     seeds = torch.randint(100_000, (args.iters,)) # seeds for the random (mocked) dataset
     layers_params = [init_tlayer_ffn(args.model_size, 4*args.model_size) for _ in range(args.layers)]
@@ -311,7 +312,7 @@ if __name__ == '__main__':
     for i, fn in enumerate(fns):
         if args.method==0 or args.method==i+1:
             t0 = time.time()
-            fn_layers_params = fn(layers_params, seeds, args.batch_size) # TODO: move to CPU
+            fn_layers_params = fn(layers_params, seeds, args.batch_size*args.seq_len) # TODO: move to CPU
             t1 = time.time()
             fns_layers_params.append(fn_layers_params)
             print(f'\n{fn.__name__} takes {t1-t0} seconds')
