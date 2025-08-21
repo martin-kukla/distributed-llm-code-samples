@@ -5,7 +5,7 @@
 #   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
 #
 # To see the advantage of FSDP over DDP, one can check the following config if running on 4 GPUs with 24GB memory each:
-# "python distributed-ffns.py --iters 4 --batch_size 8192 --model_size 8192 --layers 8 --method 3".
+# "python distributed-ffns.py --iters 4 --batch_size 6144 --model_size 8192 --layers 8 --method 3".
 # This will result in over 4B model (16GB of space, as fp32 is used). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
