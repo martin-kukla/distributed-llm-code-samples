@@ -35,7 +35,7 @@ DLOSS_DX_COEF = 0.1 # We imitatate loss function by randomized dloss_dx. We may 
 
 ### PARAMS + MODEL
 
-def init_linear_layer(m, n, scale=2e-2): 
+def init_linear_layer(m, n, scale=2e-2): # no bias as simplification
     return scale * torch.randn((n, m))
     
 def init_tlayer_ffn(emb_dim, ffn_dim):
@@ -50,8 +50,9 @@ def t_linear_bkwd(dloss_dx, layer_params, x): # input: N x D
 def t_relu_fwd(x):
     return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
 
-def t_relu_bkwd(x):
-    return torch.where(torch.le(x, 0), 0, 1)
+def t_relu_bkwd_(dloss_dx, x): # NB: in place bkwd
+    dloss_dx.masked_fill_(x <= 0, 0)
+    return dloss_dx
 
 def tlayer_ffn_fwd(layer_params, x): # input: seq_len x emb_dim
     x = linear_fwd(layer_params[0], x)
@@ -67,7 +68,7 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
     
     # propagate back
     ffn2_dloss_dp, dloss_dx = t_linear_bkwd(dloss_dx, layer_params[1], x)
-    dloss_dx = t_relu_bkwd(x_before_act) * dloss_dx # poor man's reverse-mode JVP..
+    dloss_dx = t_relu_bkwd_(dloss_dx, x_before_act)
     ffn1_dloss_dp, dloss_dx = t_linear_bkwd(dloss_dx, layer_params[0], x_in)
 
     return dloss_dx.reshape(x_in.shape), (ffn1_dloss_dp, ffn2_dloss_dp)
