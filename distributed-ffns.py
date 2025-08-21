@@ -46,20 +46,28 @@ def linear_fwd(layer_params, x): # input: seq_len x emb_dim
 
 def t_linear_bkwd(dloss_dx, layer_params, x): # input: N x D
     return torch.einsum('bc, bd -> cd', dloss_dx, x), torch.einsum('bc, cd -> bd', dloss_dx, layer_params)
-    
+
+def t_relu_fwd(x):
+    return torch.where(torch.le(x, 0), 0, x) # as inputs are broadcastable in where&le - follows pytorch's implementation
+
+def t_relu_bkwd(x):
+    return torch.where(torch.le(x, 0), 0, 1)
 
 def tlayer_ffn_fwd(layer_params, x): # input: seq_len x emb_dim
     x = linear_fwd(layer_params[0], x)
+    x = t_relu_fwd(x)
     x = linear_fwd(layer_params[1], x)
     return x
 
 
 def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
     x_in = x
-    x = linear_fwd(layer_params[0], x)
+    x_before_act = linear_fwd(layer_params[0], x)
+    x = t_relu_fwd(x_before_act)
     
     # propagate back
     ffn2_dloss_dp, dloss_dx = t_linear_bkwd(dloss_dx, layer_params[1], x)
+    dloss_dx = t_relu_bkwd(x_before_act) * dloss_dx # poor man's reverse-mode JVP..
     ffn1_dloss_dp, dloss_dx = t_linear_bkwd(dloss_dx, layer_params[0], x_in)
 
     return dloss_dx.reshape(x_in.shape), (ffn1_dloss_dp, ffn2_dloss_dp)
