@@ -77,17 +77,13 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 ## 1 GPU
 
 def train_1gpu(layers_params, seeds, batch_size):
-    gen=torch.Generator()
     model_size = layers_params[0][0].shape[1]
 
     move_l = lambda l: [p.cuda(0) for p in l]
     layers_params = [move_l(l) for l in layers_params]
 
-    for seed in seeds.numpy().tolist():
-        # Get data
-        gen.manual_seed(seed)
-        x = torch.randn((batch_size, model_size), generator=gen).cuda(0)
-        dloss_dx = DLOSS_DX_COEF*torch.randn((batch_size, model_size), generator=gen).cuda(0) 
+    for x, dloss_dx in mock_data(seeds, batch_size, model_size):
+        x, dloss_dx = x.cuda(0), dloss_dx.cuda(0)
         
         # Forward
         y=x
