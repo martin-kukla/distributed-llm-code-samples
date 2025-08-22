@@ -288,25 +288,18 @@ def train_process_mp(local_rank, chunked_layers_params, seeds, batch_size, model
             acts.append(y)
             y = tlayer_ffn_fwd(chunked_layers_params[l], y)
             dist.all_reduce(y, op=dist.ReduceOp.SUM) #NB, not async
-            if local_rank==0:
-                print(f'l {l} y {y.shape}')
 
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
         for i in reversed(range(layers)):
             batch_dloss_dx, chunked_dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, chunked_layers_params[i], acts[i])  
-            dist.all_reduce(chunked_dloss_dp[0], op=dist.ReduceOp.SUM)
-            dist.all_reduce(chunked_dloss_dp[1], op=dist.ReduceOp.SUM)
-            if local_rank==0:
-                print(f'l {l} chunked_dloss_dp[0] {chunked_dloss_dp[0].shape} chunked_dloss_dp[1] {chunked_dloss_dp[1].shape}')
+            dist.all_reduce(batch_dloss_dx, op=dist.ReduceOp.SUM)
 
             for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
                 param.add_(-LR*grad)
             
   
 def train_mp(layers_params, seeds, batch_size, model_size):
-    assert len(seeds) % nGPUs == 0
-
     def chunk_p(p, dim):
         return [p_chunk.cuda(i) for i, p_chunk in enumerate(p.chunk(nGPUs, dim=dim))]
     def chunk_l(l):
@@ -315,7 +308,7 @@ def train_mp(layers_params, seeds, batch_size, model_size):
     pre_gpus_layers_params = [list(map(list, zip(*chunked_l))) for chunked_l in chunked_layers_params]
     concat_gpu_layers = lambda i: [l[i] for l in pre_gpus_layers_params]
     gpus_layers_params = [concat_gpu_layers(i) for i in range(nGPUs)]
-    cpus_seeds = [t.reshape(-1) for t in seeds.reshape((-1, nGPUs)).chunk(nGPUs, dim=1)]
+    cpus_seeds = [seeds for _ in range(nGPUs)]
 
     processes = []
     for rank in range(nGPUs):
