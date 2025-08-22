@@ -76,9 +76,7 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
 ## 1 GPU
 
-def train_1gpu(layers_params, seeds, batch_size):
-    model_size = layers_params[0][0].shape[1]
-
+def train_1gpu(layers_params, seeds, batch_size, model_size):
     move_l = lambda l: [p.cuda(0) for p in l]
     layers_params = [move_l(l) for l in layers_params]
 
@@ -104,13 +102,13 @@ def train_1gpu(layers_params, seeds, batch_size):
 ## Multi-GPU
 
 # Utils
-def init_process(rank, layers_params, seeds, batch_size, fn):
+def init_process(rank, layers_params, seeds, batch_size, model_size, fn):
     """ Initialize the distributed environment. """
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     dist.init_process_group("nccl", rank=rank, world_size=nGPUs)
     
-    fn(rank, layers_params, seeds, batch_size)
+    fn(rank, layers_params, seeds, batch_size, model_size)
     
 from torch.profiler import profile, ProfilerActivity
 def torch_profile_rank_0(func):
@@ -139,9 +137,7 @@ def mock_data(seeds, batch_size, model_size):
     
 # DDP
 #@torch_profile_rank_0
-def train_process_ddp(local_rank, layers_params, seeds, batch_size):
-    model_size = layers_params[0][0].shape[1]
-
+def train_process_ddp(local_rank, layers_params, seeds, batch_size, model_size):
     for x, dloss_dx in mock_data(seeds, batch_size, model_size):
         x, dloss_dx = x.cuda(local_rank), dloss_dx.cuda(local_rank)
 
@@ -170,7 +166,7 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size):
             handles = [dist.all_reduce(dloss_dp[j], op=dist.ReduceOp.SUM, async_op=True) for j in range(len(dloss_dp))]
         update_l_params(0)
   
-def train_ddp(layers_params, seeds, batch_size):
+def train_ddp(layers_params, seeds, batch_size, model_size):
     assert len(seeds) % nGPUs == 0
 
     def clone_layer_params(layer_params, device):
@@ -182,7 +178,7 @@ def train_ddp(layers_params, seeds, batch_size):
 
     processes = []
     for rank in range(nGPUs):
-        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, train_process_ddp))
+        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, model_size, train_process_ddp))
         p.start()
         processes.append(p)
 
@@ -193,9 +189,8 @@ def train_ddp(layers_params, seeds, batch_size):
 
 # FSDP
 #@torch_profile_rank_0
-def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
+def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size, model_size):
     layers = len(chunked_layers_params)
-    model_size = chunked_layers_params[0][0].shape[1]
     
     def gather_layer_params_start(l):
         sharded_p0 = chunked_layers_params[l][0]
@@ -251,7 +246,7 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
                 param.add_(-LR*grad)
             
   
-def train_fsdp(layers_params, seeds, batch_size):
+def train_fsdp(layers_params, seeds, batch_size, model_size):
     assert len(seeds) % nGPUs == 0
 
     def chunk_p(p):
@@ -266,7 +261,7 @@ def train_fsdp(layers_params, seeds, batch_size):
 
     processes = []
     for rank in range(nGPUs):
-        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, train_process_fsdp))
+        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, model_size, train_process_fsdp))
         p.start()
         processes.append(p)
 
@@ -311,7 +306,7 @@ if __name__ == '__main__':
     for i, fn in enumerate(fns):
         if args.method==0 or args.method==i+1:
             t0 = time.time()
-            fn_layers_params = fn(layers_params, seeds, args.batch_size*args.seq_len) # TODO: move to CPU
+            fn_layers_params = fn(layers_params, seeds, args.batch_size*args.seq_len, args.model_size) # TODO: move to CPU
             t1 = time.time()
             fns_layers_params.append(fn_layers_params)
             print(f'\n{fn.__name__} takes {t1-t0} seconds')
