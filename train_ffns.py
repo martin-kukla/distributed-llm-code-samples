@@ -272,6 +272,64 @@ def train_fsdp(layers_params, seeds, batch_size, model_size):
         gpus_layer_params = [gpus_layers_params[i][l] for i in range(nGPUs)]
         return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params]))
     return [concat_l(l) for l in range(len(layers_params))]
+
+# Model Parallleism
+def train_process_mp(local_rank, chunked_layers_params, seeds, batch_size, model_size):
+    layers = len(chunked_layers_params)
+
+    for x, dloss_dx in mock_data(seeds, batch_size, model_size):
+        x, dloss_dx = x.cuda(local_rank), dloss_dx.cuda(local_rank)
+
+        # Forward
+        y=x
+        acts = []
+                
+        for l in range(layers):
+            acts.append(y)
+            y = tlayer_ffn_fwd(chunked_layers_params[l], y)
+            dist.all_reduce(y, op=dist.ReduceOp.SUM) #NB, not async
+            if local_rank==0:
+                print(f'l {l} y {y.shape}')
+
+        # Backward + optimizer (in-place SGD)
+        batch_dloss_dx = dloss_dx
+        for i in reversed(range(layers)):
+            batch_dloss_dx, chunked_dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, chunked_layers_params[i], acts[i])  
+            dist.all_reduce(chunked_dloss_dp[0], op=dist.ReduceOp.SUM)
+            dist.all_reduce(chunked_dloss_dp[1], op=dist.ReduceOp.SUM)
+            if local_rank==0:
+                print(f'l {l} chunked_dloss_dp[0] {chunked_dloss_dp[0].shape} chunked_dloss_dp[1] {chunked_dloss_dp[1].shape}')
+
+            for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
+                param.add_(-LR*grad)
+            
+  
+def train_mp(layers_params, seeds, batch_size, model_size):
+    assert len(seeds) % nGPUs == 0
+
+    def chunk_p(p, dim):
+        return [p_chunk.cuda(i) for i, p_chunk in enumerate(p.chunk(nGPUs, dim=dim))]
+    def chunk_l(l):
+        return [chunk_p(p, i) for i, p in enumerate(l)]
+    chunked_layers_params = [chunk_l(l) for l in layers_params]
+    pre_gpus_layers_params = [list(map(list, zip(*chunked_l))) for chunked_l in chunked_layers_params]
+    concat_gpu_layers = lambda i: [l[i] for l in pre_gpus_layers_params]
+    gpus_layers_params = [concat_gpu_layers(i) for i in range(nGPUs)]
+    cpus_seeds = [t.reshape(-1) for t in seeds.reshape((-1, nGPUs)).chunk(nGPUs, dim=1)]
+
+    processes = []
+    for rank in range(nGPUs):
+        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, model_size, train_process_mp))
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+    def concat_l(l):
+        gpus_layer_params = [gpus_layers_params[i][l] for i in range(nGPUs)]
+        return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params], dim=0), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))
+    return [concat_l(l) for l in range(len(layers_params))]
     
 #### Setup:
 
@@ -300,7 +358,7 @@ if __name__ == '__main__':
     print(f'initial layers_params[0]', layers_params[0][0].shape, layers_params[0][1].shape)
     print(f'initial layers_params[0]', layers_params[0][0][:5,:5], layers_params[0][1][:5,:5])
     
-    fns = [train_1gpu, train_ddp, train_fsdp]
+    fns = [train_1gpu, train_ddp, train_fsdp, train_mp]
     fns_layers_params = []
     mp.set_start_method('spawn')
     for i, fn in enumerate(fns):
