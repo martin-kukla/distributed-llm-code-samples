@@ -208,7 +208,7 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
     def gather_layer_params_end(sharded_ps, handles):
         for h in handles:
             h.wait()
-        return (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1], dim=1))
+        return (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1]))
         
     chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[0]]) # Buffers for results of ReduceScatter
     
@@ -243,10 +243,10 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
                 layer_params = gather_layer_params_end(sharded_ps, handles)
 
             # TODO: overlap communication and computation for the below (we need more than one ProcessGroup)
-            def chunk_g(g, dim=0):
-                return [ch_p.contiguous() for ch_p in g.chunk(nGPUs, dim=dim)]
+            def chunk_g(g):
+                return [ch_p.contiguous() for ch_p in g.chunk(nGPUs)]
             dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
-            dist.reduce_scatter(chunked_dloss_dp[1], chunk_g(dloss_dp[1], dim=1), op=dist.ReduceOp.SUM)
+            dist.reduce_scatter(chunked_dloss_dp[1], chunk_g(dloss_dp[1]), op=dist.ReduceOp.SUM)
 
             for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
                 param.add_(-LR*grad)
@@ -255,10 +255,10 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
 def train_fsdp(layers_params, seeds, batch_size):
     assert len(seeds) % nGPUs == 0
 
-    def chunk_p(p, dim):
-        return [p_chunk.cuda(i) for i, p_chunk in enumerate(p.chunk(nGPUs, dim=dim))]
+    def chunk_p(p):
+        return [p_chunk.cuda(i) for i, p_chunk in enumerate(p.chunk(nGPUs))]
     def chunk_l(l):
-        return [chunk_p(p, dim=i%2) for i, p in enumerate(l)]
+        return [chunk_p(p) for i, p in enumerate(l)]
     chunked_layers_params = [chunk_l(l) for l in layers_params]
     pre_gpus_layers_params = [list(map(list, zip(*chunked_l))) for chunked_l in chunked_layers_params]
     concat_gpu_layers = lambda i: [l[i] for l in pre_gpus_layers_params]
@@ -276,7 +276,7 @@ def train_fsdp(layers_params, seeds, batch_size):
 
     def concat_l(l):
         gpus_layer_params = [gpus_layers_params[i][l] for i in range(nGPUs)]
-        return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params], dim=1))
+        return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params]))
     return [concat_l(l) for l in range(len(layers_params))]
     
 #### Setup:
