@@ -35,11 +35,11 @@ DLOSS_DX_COEF = 0.1 # We imitatate loss function by randomized dloss_dx. We may 
 
 ### PARAMS + MODEL
 
-def init_linear_layer(m, n, scale=2e-2): # no bias as simplification
-    return scale * torch.randn((n, m))
+def init_linear_layer(m, n, gen, scale=2e-2): # no bias as simplification
+    return scale * torch.randn((n, m), generator=gen)
     
-def init_tlayer_ffn(emb_dim, ffn_dim):
-    return [init_linear_layer(emb_dim, ffn_dim)] +  [init_linear_layer(ffn_dim, emb_dim)]
+def init_tlayer_ffn(emb_dim, ffn_dim, gen):
+    return [init_linear_layer(emb_dim, ffn_dim, gen)] +  [init_linear_layer(ffn_dim, emb_dim, gen)]
 
 def linear_fwd(layer_params, x): # input: seq_len x emb_dim
     return torch.matmul(x, torch.transpose(layer_params, 0, 1))
@@ -334,12 +334,18 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--layers', type=int, default=1)
     parser.add_argument('-d', '--model_size', type=int, default=4)
     parser.add_argument('-m', '--method', type=int, default=0)
+    parser.add_argument('-r', '--random_seed', type=int, default=0) # makes it reproducible across runs
     args = parser.parse_args()
     
     print(f'ARGS:\n num_steps: {args.num_steps}\n BS: {args.batch_size}\n N: {args.seq_len}\n D: {args.model_size}\n FFN: {4*args.model_size}\n')
 
-    seeds = torch.randint(100_000, (args.num_steps,)) # seeds for the random (mocked) dataset
-    layers_params = [init_tlayer_ffn(args.model_size, 4*args.model_size) for _ in range(args.layers)]
+    gen = None
+    if args.random_seed !=0:
+        gen = torch.Generator()
+        gen.manual_seed(args.random_seed)
+    
+    seeds = torch.randint(100_000, (args.num_steps,), generator=gen) # seeds for the random (mocked) dataset
+    layers_params = [init_tlayer_ffn(args.model_size, 4*args.model_size, gen) for _ in range(args.layers)]
 
     num_params = sum([p.numel() for layer_params in layers_params for p in layer_params ])
     def _gb(t_numel):
