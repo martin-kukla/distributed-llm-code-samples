@@ -129,18 +129,25 @@ def torch_profile_rank_0(func):
             prof.export_chrome_trace("trace_profiler_trace.json")
             print("Profiler exported")
     return wrapper_torch_profile_rank_0
+
+# Random data, and dloss_dx
+def mock_data(seeds, batch_size, model_size):
+    gen = torch.Generator()
+    for seed in seeds.numpy().tolist():
+        # get data
+        gen.manual_seed(seed)
+        x = torch.randn((batch_size, model_size), generator=gen)
+        dloss_dx = DLOSS_DX_COEF*torch.randn((batch_size, model_size), generator=gen)
+        yield (x, dloss_dx)
+    
     
 # DDP
 #@torch_profile_rank_0
 def train_process_ddp(local_rank, layers_params, seeds, batch_size):
-    gen=torch.Generator()
     model_size = layers_params[0][0].shape[1]
 
-    for seed in seeds.numpy().tolist():
-        # get data
-        gen.manual_seed(seed)
-        x = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
-        dloss_dx = DLOSS_DX_COEF*torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
+    for x, dloss_dx in mock_data(seeds, batch_size, model_size):
+        x, dloss_dx = x.cuda(local_rank), dloss_dx.cuda(local_rank)
 
         # Forward
         y=x
@@ -191,7 +198,6 @@ def train_ddp(layers_params, seeds, batch_size):
 # FSDP
 #@torch_profile_rank_0
 def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
-    gen=torch.Generator()
     layers = len(chunked_layers_params)
     model_size = chunked_layers_params[0][0].shape[1]
     
@@ -213,11 +219,8 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size):
     chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[0]]) # Buffers for results of ReduceScatter
     
 
-    for seed in seeds.numpy().tolist():
-        # get data
-        gen.manual_seed(seed)
-        x = torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
-        dloss_dx = DLOSS_DX_COEF*torch.randn((batch_size, model_size), generator=gen).cuda(local_rank)
+    for x, dloss_dx in mock_data(seeds, batch_size, model_size):
+        x, dloss_dx = x.cuda(local_rank), dloss_dx.cuda(local_rank)
 
         # Forward
         y=x
