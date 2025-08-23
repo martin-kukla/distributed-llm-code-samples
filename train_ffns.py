@@ -72,6 +72,23 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
     return dloss_dx.reshape(x_in.shape), (ffn1_dloss_dp, ffn2_dloss_dp)
 
+def tlayers_ffn_fwd(layers_params, x):
+    y=x
+    acts = []
+    for l in layers_params:
+        acts.append(y)
+        y = tlayer_ffn_fwd(l, y)
+    return y, acts
+
+# Backward pass, and fused SGD optimizer with in place modification for weights
+def tlayers_ffn_bkwd_fused_(dloss_dx, layers_params, acts):
+    batch_dloss_dx = dloss_dx
+    for i in reversed(range(len(layers_params))):
+        batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])       
+
+        layers_params[i] = [p-LR*g for p, g in zip(layers_params[i], dloss_dp)] # TODO XO: make realy in place instead
+    
+
 #### Training methods: 1GPU, DDP, FSDP
 
 ## 1 GPU
@@ -84,18 +101,10 @@ def train_1gpu(layers_params, seeds, batch_size, model_size):
         x, dloss_dx = x.cuda(0), dloss_dx.cuda(0)
         
         # Forward
-        y=x
-        acts = []
-        for l in layers_params:
-            acts.append(y)
-            y = tlayer_ffn_fwd(l, y)
+        y, acts = tlayers_ffn_fwd(layers_params, x)
         
         # Backward + optimizer (just SGD for now)
-        batch_dloss_dx = dloss_dx
-        for i in reversed(range(len(layers_params))):
-            batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])       
-        
-            layers_params[i] = [p-LR*g for p, g in zip(layers_params[i], dloss_dp)]
+        tlayers_ffn_bkwd_fused_(dloss_dx, layers_params, acts)
     
     return layers_params
 
