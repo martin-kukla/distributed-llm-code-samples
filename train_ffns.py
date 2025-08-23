@@ -151,11 +151,7 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size, model_size):
         x, dloss_dx = x.cuda(local_rank), dloss_dx.cuda(local_rank)
 
         # Forward
-        y=x
-        acts = []
-        for l in layers_params:
-            acts.append(y)
-            y = tlayer_ffn_fwd(l, y)
+        y, acts = tlayers_ffn_fwd(layers_params, x)
 
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
