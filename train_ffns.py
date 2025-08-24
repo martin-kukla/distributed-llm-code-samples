@@ -80,16 +80,18 @@ def tlayers_ffn_fwd(layers_params, x):
         y = tlayer_ffn_fwd(l, y)
     return y, acts
 
-def tlayers_ffn_bkwd(dloss_dx, layers_params, acts):
+def tlayers_ffn_bkwd(dloss_dx, layers_params, acts, after_bkwd_comms_hook=None):
     batch_dloss_dx = dloss_dx
     dloss_dp_lst = []
+    comms_handles = []
     for i in reversed(range(len(layers_params))):
         batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])       
-
         dloss_dp_lst.append(dloss_dp)
-        
-        # TODO XO: version with comms should return the list of comms' handles too
-    return list(reversed(dloss_dp_lst))
+        if after_bkwd_comms_hook is not None:
+            comms_handles.append(after_bkwd_comms_hook(dloss_dp))
+        else:
+            comms_handles.append(None)
+    return list(reversed(dloss_dp_lst)), list(reversed(comms_handles))
     
 
 #### Training methods: 1GPU, DDP, FSDP
@@ -107,7 +109,7 @@ def train_1gpu(layers_params, seeds, batch_size, model_size):
         y, acts = tlayers_ffn_fwd(layers_params, x)
         
         # Backward + optimizer (just SGD for now)
-        dloss_dp_lst = tlayers_ffn_bkwd(dloss_dx, layers_params, acts)
+        dloss_dp_lst, _ = tlayers_ffn_bkwd(dloss_dx, layers_params, acts)
         for i in range(len(layers_params)):
             layers_params[i] = [p-LR*g for p, g in zip(layers_params[i], dloss_dp_lst[i])]
     
