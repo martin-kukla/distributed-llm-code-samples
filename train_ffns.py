@@ -80,13 +80,16 @@ def tlayers_ffn_fwd(layers_params, x):
         y = tlayer_ffn_fwd(l, y)
     return y, acts
 
-# Backward pass, and fused SGD optimizer with in place modification for weights
-def tlayers_ffn_bkwd_fused_(dloss_dx, layers_params, acts):
+def tlayers_ffn_bkwd(dloss_dx, layers_params, acts):
     batch_dloss_dx = dloss_dx
+    dloss_dp_lst = []
     for i in reversed(range(len(layers_params))):
         batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])       
 
-        layers_params[i] = [p-LR*g for p, g in zip(layers_params[i], dloss_dp)] # TODO XO: make realy in place instead
+        dloss_dp_lst.append(dloss_dp)
+        
+        # TODO XO: version with comms should return the list of comms' handles too
+    return list(reversed(dloss_dp_lst))
     
 
 #### Training methods: 1GPU, DDP, FSDP
@@ -104,7 +107,9 @@ def train_1gpu(layers_params, seeds, batch_size, model_size):
         y, acts = tlayers_ffn_fwd(layers_params, x)
         
         # Backward + optimizer (just SGD for now)
-        tlayers_ffn_bkwd_fused_(dloss_dx, layers_params, acts)
+        dloss_dp_lst = tlayers_ffn_bkwd(dloss_dx, layers_params, acts)
+        for i in range(len(layers_params)):
+            layers_params[i] = [p-LR*g for p, g in zip(layers_params[i], dloss_dp_lst[i])]
     
     return layers_params
 
