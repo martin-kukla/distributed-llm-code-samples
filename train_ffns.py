@@ -72,23 +72,26 @@ def tlayer_ffn_bkwd(dloss_dx, layer_params, x):
 
     return dloss_dx.reshape(x_in.shape), (ffn1_dloss_dp, ffn2_dloss_dp)
 
-def tlayers_ffn_fwd(layers_params, x):
+def tlayers_ffn_fwd(layers_params, x, before_comms_hook=None):
     y=x
     acts = []
+    handle = None
     for l in layers_params:
         acts.append(y)
+        if before_comms_hook is not None:
+            handle = before_comms_hook(handle)
         y = tlayer_ffn_fwd(l, y)
     return y, acts
 
-def tlayers_ffn_bkwd(dloss_dx, layers_params, acts, after_bkwd_comms_hook=None):
+def tlayers_ffn_bkwd(dloss_dx, layers_params, acts, after_comms_hook=None):
     batch_dloss_dx = dloss_dx
     dloss_dp_lst = []
     comms_handles = []
     for i in reversed(range(len(layers_params))):
         batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])       
         dloss_dp_lst.append(dloss_dp)
-        if after_bkwd_comms_hook is not None:
-            comms_handles.append(after_bkwd_comms_hook(dloss_dp))
+        if after_comms_hook is not None:
+            comms_handles.append(after_comms_hook(dloss_dp))
         else:
             comms_handles.append(None)
     return list(reversed(dloss_dp_lst)), list(reversed(comms_handles))
@@ -164,7 +167,7 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size, model_size):
         def ddp_comms_hook(dloss_dp):
             return [dist.all_reduce(dloss_dp[j], op=dist.ReduceOp.SUM, async_op=True) for j in range(len(dloss_dp))]
         
-        dloss_dp_lst, handles = tlayers_ffn_bkwd(dloss_dx, layers_params, acts, after_bkwd_comms_hook=ddp_comms_hook)
+        dloss_dp_lst, handles = tlayers_ffn_bkwd(dloss_dx, layers_params, acts, after_comms_hook=ddp_comms_hook)
         for i in reversed(range(len(layers_params))):
             for h in handles[i]:
                 h.wait()
