@@ -160,23 +160,16 @@ def train_process_ddp(local_rank, layers_params, seeds, batch_size, model_size):
         # Forward
         y, acts = tlayers_ffn_fwd(layers_params, x)
 
-        # Backward + optimizer (in-place SGD)
-        batch_dloss_dx = dloss_dx
-        dloss_dp = None
-        handles = []
-        def update_l_params(i):
-            for h in handles:
-                h.wait()
-            for param, grad in zip(layers_params[i], (dloss_dp[0], dloss_dp[1])):
-                param.add_(-LR*grad)
-                
+        # Backward
+        def ddp_comms_hook(dloss_dp):
+            return [dist.all_reduce(dloss_dp[j], op=dist.ReduceOp.SUM, async_op=True) for j in range(len(dloss_dp))]
+        
+        dloss_dp_lst, handles = tlayers_ffn_bkwd(dloss_dx, layers_params, acts, after_bkwd_comms_hook=ddp_comms_hook)
         for i in reversed(range(len(layers_params))):
-            batch_dloss_dx, n_dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layers_params[i], acts[i])  
-            if i< len(layers_params)-1:
-                update_l_params(i+1)
-            dloss_dp = n_dloss_dp
-            handles = [dist.all_reduce(dloss_dp[j], op=dist.ReduceOp.SUM, async_op=True) for j in range(len(dloss_dp))]
-        update_l_params(0)
+            for h in handles[i]:
+                h.wait()
+            for param, grad in zip(layers_params[i], (dloss_dp_lst[i][0], dloss_dp_lst[i][1])):
+                param.add_(-LR*grad)
   
 def train_ddp(layers_params, seeds, batch_size, model_size):
     assert len(seeds) % nGPUs == 0
