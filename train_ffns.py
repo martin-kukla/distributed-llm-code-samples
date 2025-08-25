@@ -1,20 +1,17 @@
 # This is a toy example how to distribute the computation of Transformer's FFN sublocks among GPUs
-# It shows how to implmement DDP and FSDP from the first principle (see the asterisk below).
+# It shows how to implmement DDP, FSDP and MP from the first principle (I use torch.distributed as thin wrapper for collective communications
+# primitives such as all_reduce, all_gather etc.).
 #
 # To test, run "python train_ffns.py --num_steps 16 --batch_size 8 --seq_len 1024 --layers 1 --model_size 8192 --method M", where M is one of:
-#   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP)
+#   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP), "4": run MP
 #
-# To see the advantage of FSDP over DDP, one can check the following config if running on 4 GPUs with 24GB memory each:
+# For example, to see the advantage of FSDP over DDP, one can check the following config if running on 4 GPUs with 24GB memory each:
 # "python train_ffns.py --num_steps 4 --batch_size 8 --seq_len 1024 --model_size 8192 --layers 8 --method 3".
 # This will result in over 4B model (16GB of space, as fp32 is used). The training will work if FSDP is used (i.e. method 3), but not with DDP (i.e. method 2).
 #
 # NB: For simplicity, the random dataset is used, and no real loss function is used ( I imitate it by randomized dloss_dx coming from "right")
 #
 # Remaining TODO: improve the overalapping of communication and computation for FSDP (ReduceScatter is not overlapped right now. We need more than one process group, see: https://github.com/pytorch/pytorch/issues/67158)
-#
-# (The asterisk: I use the NCCL through torch.distributed package i.e. I use its init_process_group() method and its communication collectives e.g. all_reduce.
-# I meant to use torch.cuda.nccl directly, but there is a known issue: https://github.com/pytorch/pytorch/issues/38019.
-# Using torch.distributed package slightly simplifies coding up the communication between GPUs, but this is still relatively a thin wrapper for NCCL.)
 
 import argparse
 import math
