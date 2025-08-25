@@ -201,12 +201,13 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size, mod
     layers = len(chunked_layers_params)
     
     def gather_layer_params_start(l):
-        sharded_p0 = chunked_layers_params[l][0]
-        sharded_p0s = [torch.zeros_like(sharded_p0).cuda(local_rank) for _ in range(nGPUs)]
-        handle0 = dist.all_gather(sharded_p0s, sharded_p0, async_op=True) 
-        sharded_p1 = chunked_layers_params[l][1]
-        sharded_p1s = [torch.zeros_like(sharded_p1).cuda(local_rank) for _ in range(nGPUs)]
-        handle1 = dist.all_gather(sharded_p1s, sharded_p1, async_op=True)
+        def gather_sharded_p(sharded_p):
+            sharded_ps = [torch.zeros_like(sharded_p).cuda(local_rank) for _ in range(nGPUs)]
+            handle = dist.all_gather(sharded_ps, sharded_p, async_op=True)
+            return (sharded_ps, handle)
+           
+        sharded_p0s, handle0 = gather_sharded_p(chunked_layers_params[l][0])
+        sharded_p1s, handle1 = gather_sharded_p(chunked_layers_params[l][1])
 
         return ([sharded_p0s, sharded_p1s], [handle0, handle1])
         
