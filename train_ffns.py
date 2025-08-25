@@ -1,5 +1,5 @@
 # This is a toy example how to distribute the computation of Transformer's FFN sublocks among GPUs
-# It shows how to implmement DDP, FSDP and MP from the first principle (I use torch.distributed as thin wrapper for collective communications
+# It shows how to implmement DDP, FSDP and MP from the first principle (I use torch.distributed as a thin wrapper for collective communications
 # primitives such as all_reduce, all_gather etc.).
 #
 # To test, run "python train_ffns.py --num_steps 16 --batch_size 8 --seq_len 1024 --layers 1 --model_size 8192 --method M", where M is one of:
