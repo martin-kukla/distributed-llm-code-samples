@@ -3,7 +3,7 @@
 # primitives such as all_reduce, all_gather etc.).
 #
 # To test, run "python train_ffns.py --num_steps 16 --batch_size 8 --seq_len 1024 --layers 1 --model_size 8192 --method M", where M is one of:
-#   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP), "4": run MP
+#   "0": run all methods;  "1": run on 1GPU, "2": run DDP, "3": run FSDP (with DDP), "4": run TP (as in Megatron-LM paper)
 #
 # For example, to see the advantage of FSDP over DDP, one can check the following config if running on 4 GPUs with 24GB memory each:
 # "python train_ffns.py --num_steps 4 --batch_size 8 --seq_len 1024 --model_size 8192 --layers 8 --method 3".
@@ -286,8 +286,8 @@ def train_fsdp(layers_params, seeds, batch_size, model_size):
         return (torch.cat([gpu_p[0].cuda(0) for gpu_p in gpus_layer_params]), torch.cat([gpu_p[1].cuda(0) for gpu_p in gpus_layer_params]))
     return [concat_l(l) for l in range(len(layers_params))]
 
-# Model Parallleism
-def train_process_mp(local_rank, chunked_layers_params, seeds, batch_size, model_size):
+# Tensor Parallleism
+def train_process_tp(local_rank, chunked_layers_params, seeds, batch_size, model_size):
     layers = len(chunked_layers_params)
 
     for x, dloss_dx in mock_data(seeds, batch_size, model_size):
@@ -312,7 +312,7 @@ def train_process_mp(local_rank, chunked_layers_params, seeds, batch_size, model
                 param.add_(-LR*grad)
             
   
-def train_mp(layers_params, seeds, batch_size, model_size):
+def train_tp(layers_params, seeds, batch_size, model_size):
     def chunk_p(p, dim):
         return [p_chunk.cuda(i) for i, p_chunk in enumerate(p.chunk(nGPUs, dim=dim))]
     def chunk_l(l):
@@ -325,7 +325,7 @@ def train_mp(layers_params, seeds, batch_size, model_size):
 
     processes = []
     for rank in range(nGPUs):
-        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, model_size, train_process_mp))
+        p = mp.Process(target=init_process, args=(rank, gpus_layers_params[rank], cpus_seeds[rank], batch_size, model_size, train_process_tp))
         p.start()
         processes.append(p)
 
@@ -370,7 +370,7 @@ if __name__ == '__main__':
     print(f'initial layers_params[0]', layers_params[0][0].shape, layers_params[0][1].shape)
     print(f'initial layers_params[0]', layers_params[0][0][:5,:5], layers_params[0][1][:5,:5])
     
-    fns = [train_1gpu, train_ddp, train_fsdp, train_mp]
+    fns = [train_1gpu, train_ddp, train_fsdp, train_tp]
     fns_layers_params = []
     mp.set_start_method('spawn')
     for i, fn in enumerate(fns):
