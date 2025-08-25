@@ -200,12 +200,12 @@ def train_ddp(layers_params, seeds, batch_size, model_size):
 def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size, model_size):
     layers = len(chunked_layers_params)
     
-    def gather_layer_params_start(l):
-        def gather_sharded_p(sharded_p):
-            sharded_ps = [torch.zeros_like(sharded_p).cuda(local_rank) for _ in range(nGPUs)]
-            handle = dist.all_gather(sharded_ps, sharded_p, async_op=True)
-            return (sharded_ps, handle)
+    def gather_sharded_p(sharded_p):
+        sharded_ps = [torch.zeros_like(sharded_p).cuda(local_rank) for _ in range(nGPUs)]
+        handle = dist.all_gather(sharded_ps, sharded_p, async_op=True)
+        return (sharded_ps, handle)
         
+    def gather_layer_params_start(l):  
         sharded_ps_lst, handles = [], []
         for i in range(2):
             sharded_p, handle = gather_sharded_p(chunked_layers_params[l][i])
@@ -218,6 +218,24 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size, mod
         for h in handles:
             h.wait()
         return (torch.cat(sharded_ps[0]), torch.cat(sharded_ps[1]))
+    
+    # WIP
+    def n_gather_layer_params(l, prev_sharded_ps=None, prev_handles=None):
+        if prev_sharded_ps is not None:
+            assert prev_handles is not None
+            layer_params=gather_layer_params_end(prev_sharded_ps, prev_handles)
+        else: # For the first layer, don't call gather all
+            assert prev_handles is None
+            layer_params=None
+        
+        sharded_ps_lst, handles = [], []
+        if l<len(chunked_layers_params): # For the last layer, call gather all only
+            for i in range(2):
+                sharded_p, handle = gather_sharded_p(chunked_layers_params[l][i])
+                sharded_ps_lst.append(sharded_p)
+                handles.append(handle) 
+        
+        return (layer_params, sharded_ps_lst, handles)
         
     chunked_dloss_dp = tuple([torch.clone(p).cuda(local_rank) for p in chunked_layers_params[0]]) # Buffers for results of ReduceScatter
     
@@ -228,17 +246,13 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size, mod
         # Forward
         y=x
         acts = []
-        sharded_ps, handles = gather_layer_params_start(0)
-        layer_params = gather_layer_params_end(sharded_ps, handles)
+        _, sharded_ps, handles = n_gather_layer_params(0)
                 
         for l in range(layers):
             acts.append(y)
-            if l< layers-1:
-                sharded_ps, handles = gather_layer_params_start(l+1)
+            layer_params, sharded_ps, handles  = n_gather_layer_params(l+1, sharded_ps, handles)
             y = tlayer_ffn_fwd(layer_params, y)
-            if l< layers-1:
-                layer_params = gather_layer_params_end(sharded_ps, handles)
-
+            
         # Backward + optimizer (in-place SGD)
         batch_dloss_dx = dloss_dx
         for i in reversed(range(layers)):
@@ -256,6 +270,37 @@ def train_process_fsdp(local_rank, chunked_layers_params, seeds, batch_size, mod
 
             for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
                 param.add_(-LR*grad)
+    
+#         y=x
+#         acts = []
+#         sharded_ps, handles = gather_layer_params_start(0)
+#         layer_params = gather_layer_params_end(sharded_ps, handles)
+                
+#         for l in range(layers):
+#             acts.append(y)
+#             if l< layers-1:
+#                 sharded_ps, handles = gather_layer_params_start(l+1)
+#             y = tlayer_ffn_fwd(layer_params, y)
+#             if l< layers-1:
+#                 layer_params = gather_layer_params_end(sharded_ps, handles)
+
+#         # Backward + optimizer (in-place SGD)
+#         batch_dloss_dx = dloss_dx
+#         for i in reversed(range(layers)):
+#             if i>0:
+#                 sharded_ps, handles = gather_layer_params_start(i-1)
+#             batch_dloss_dx, dloss_dp = tlayer_ffn_bkwd(batch_dloss_dx, layer_params, acts[i])  
+#             if i>0:
+#                 layer_params = gather_layer_params_end(sharded_ps, handles)
+
+#             # TODO: overlap communication and computation for the below (we need more than one ProcessGroup)
+#             def chunk_g(g):
+#                 return [ch_p.contiguous() for ch_p in g.chunk(nGPUs)]
+#             dist.reduce_scatter(chunked_dloss_dp[0], chunk_g(dloss_dp[0]), op=dist.ReduceOp.SUM)
+#             dist.reduce_scatter(chunked_dloss_dp[1], chunk_g(dloss_dp[1]), op=dist.ReduceOp.SUM)
+
+#             for param, grad in zip(chunked_layers_params[i], (chunked_dloss_dp[0], chunked_dloss_dp[1])):
+#                 param.add_(-LR*grad)
             
   
 def train_fsdp(layers_params, seeds, batch_size, model_size):
